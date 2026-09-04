@@ -98,5 +98,6 @@ pub mod error;
 pub mod introspect;
 pub mod naming;
 pub mod output;
+pub mod quoting;
 pub mod render;
 pub mod typemap;

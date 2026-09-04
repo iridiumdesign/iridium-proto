@@ -97,3 +97,37 @@ pub fn opts<'a>(generate: &'a Generate, strategy: Strategy) -> Opts<'a> {
         name_override: None,
     }
 }
+
+/// A table that unquoted SQL cannot express: a reserved word for its own
+/// name, a reserved word for a column, a column Postgres would fold, and
+/// one with a space in it.
+pub fn awkward() -> Model {
+    let columns = vec![
+        with_default(
+            column("id", PgType::Scalar("uuid".into()), "uuid", true),
+            "gen_random_uuid()",
+        ),
+        column("select", PgType::Scalar("text".into()), "text", true),
+        column(
+            "Mixed Case",
+            PgType::Scalar("int4".into()),
+            "integer",
+            false,
+        ),
+        column("desc", PgType::Scalar("text".into()), "text", false),
+    ];
+
+    Model {
+        table: Table {
+            schema: "shop".into(),
+            name: "order".into(),
+            kind: RelKind::Table,
+            comment: None,
+            columns,
+            primary_key: vec!["id".into()],
+            unique_keys: vec![vec!["select".into()]],
+            foreign_keys: Vec::new(),
+        },
+        enums: Vec::new(),
+    }
+}

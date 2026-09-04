@@ -70,6 +70,25 @@ CREATE TABLE $SCHEMA.item (
 );
 COMMENT ON TABLE $SCHEMA.item IS 'A thing on a shelf.';
 COMMENT ON COLUMN $SCHEMA.item.slug IS 'Stable external identifier.';
+
+-- A table whose name is a SQL injection payload, and a neighbour for it
+-- to destroy if the quoting ever stops holding.
+CREATE TABLE $SCHEMA.keep_me (id integer PRIMARY KEY);
+INSERT INTO $SCHEMA.keep_me VALUES (1);
+CREATE TABLE $SCHEMA."evil""; DROP TABLE keep_me; --" (
+    id   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    note text NOT NULL
+);
+
+-- Nothing here is expressible in unquoted SQL: the relation is a
+-- reserved word, so are two columns, and one would fold if written bare.
+CREATE TABLE $SCHEMA."order" (
+    id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    "select"     text NOT NULL UNIQUE,
+    "Mixed Case" integer,
+    "desc"       text,
+    bin_id       uuid NOT NULL REFERENCES $SCHEMA.bin(id)
+);
 SQL
 
 mkdir -p "$WORK/src/model" "$WORK/src/mapper" "$WORK/migrations"
@@ -108,10 +127,13 @@ say "applying the functions and exercising them"
 # numbers proto chose.
 BIN_SQL=$(ls "$WORK"/migrations/*_"${SCHEMA}"_bin_crud.sql)
 ITEM_SQL=$(ls "$WORK"/migrations/*_"${SCHEMA}"_item_crud.sql)
+ORDER_SQL=$(ls "$WORK"/migrations/*_"${SCHEMA}"_order_crud.sql)
+EVIL_SQL=$(ls "$WORK"/migrations/*_"${SCHEMA}"_evil*_crud.sql)
 psql -q -v ON_ERROR_STOP=1 <<SQL
 BEGIN;
 \\i $BIN_SQL
 \\i $ITEM_SQL
+\\i $ORDER_SQL
 
 SELECT id AS bin_id FROM $SCHEMA.bin_insert('B1') \\gset
 -- A NULL status must fall through COALESCE to the column default.
@@ -129,6 +151,32 @@ SELECT count(*) AS listed  FROM $SCHEMA.item_list();
 SELECT name, status, price
   FROM $SCHEMA.item_update(:'item_id', 'widget', 'Widget 2', 'active',
                            19.99, ARRAY['c'], :'bin_id');
+
+\\echo '  reserved words and folding columns'
+SELECT id AS order_id
+  FROM $SCHEMA.order_insert('first', 42, 'a note', :'bin_id') \\gset
+SELECT "select", "Mixed Case", "desc" FROM $SCHEMA.order_get(:'order_id');
+SELECT count(*) AS by_select FROM $SCHEMA.order_by_select('first');
+SELECT count(*) AS ordered FROM $SCHEMA.order_list();
+SELECT "select" FROM $SCHEMA.order_update(:'order_id', 'second', 43,
+                                          'another note', :'bin_id');
+SELECT $SCHEMA.order_delete(:'order_id');
+
+\\echo '  a table named like an injection payload'
+-- Applying this at all is the test: if the name escaped its quoting,
+-- the DDL would carry a DROP with it.
+\\i $EVIL_SQL
+SELECT count(*) AS functions
+  FROM pg_proc p
+  JOIN pg_namespace n ON n.oid = p.pronamespace
+ WHERE n.nspname = '$SCHEMA' AND p.proname LIKE 'evil%';
+DO \$\$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM $SCHEMA.keep_me) THEN
+        RAISE EXCEPTION 'keep_me was dropped: the payload executed';
+    END IF;
+END \$\$;
+\\echo '  keep_me survived'
 
 \\echo '  delete'
 SELECT $SCHEMA.item_delete(:'item_id');

@@ -61,18 +61,36 @@ pub fn snake_case(input: &str) -> String {
     out
 }
 
-/// A field or module name that is safe to emit. Keywords come back as raw
-/// identifiers (`r#type`) so the name still matches the column.
+/// A field or module name that is safe to emit.
+///
+/// Punctuation becomes an underscore and capitals are folded, so a column
+/// Postgres let someone quote into `Mixed Case` yields `mixed_case`
+/// rather than a name rustc lints on. The generated `#[sqlx(rename)]`
+/// carries the real column name, so nothing is lost by not matching it
+/// character for character. Keywords come back as raw identifiers
+/// (`r#type`).
 pub fn ident(input: &str) -> String {
-    let mut out: String = input
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
+    let mut out = String::with_capacity(input.len());
+    for c in input.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('_') {
+            // Runs collapse: rustc lints on `a__b` as much as on `aB`,
+            // and a name built from punctuation is mostly punctuation.
+            out.push('_');
+        }
+    }
+    while out.ends_with('_') {
+        out.pop();
+    }
+    if out.is_empty() {
+        out.push('_');
+    }
     if out.starts_with(|c: char| c.is_ascii_digit()) {
         out.insert(0, '_');
     }
     if KEYWORDS.contains(&out.as_str()) {
-        // `self`, `super`, `crate` and `Self` cannot be raw identifiers.
+        // `self`, `super` and `crate` cannot be raw identifiers.
         if matches!(out.as_str(), "self" | "super" | "crate") {
             out.push('_');
         } else {
@@ -106,11 +124,15 @@ mod tests {
     /// SECURITY.md.
     #[test]
     fn idents_cannot_traverse() {
-        assert_eq!(ident("../../etc/passwd"), "______etc_passwd");
+        assert_eq!(ident("../../etc/passwd"), "_etc_passwd");
         assert_eq!(ident("/absolute"), "_absolute");
         assert!(!ident("a/b").contains('/'));
         assert!(!ident("a\\b").contains('\\'));
         assert!(!ident("..").contains('.'));
+        assert_eq!(
+            ident(r#"evil"; DROP TABLE keep_me; --"#),
+            "evil_drop_table_keep_me"
+        );
     }
 
     #[test]
@@ -118,6 +140,8 @@ mod tests {
         assert_eq!(ident("type"), "r#type");
         assert_eq!(ident("self"), "self_");
         assert_eq!(ident("common name"), "common_name");
+        assert_eq!(ident("Mixed Case"), "mixed_case");
+        assert_eq!(ident("ID"), "id");
         assert_eq!(ident("1st"), "_1st");
     }
 }

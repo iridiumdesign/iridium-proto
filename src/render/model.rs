@@ -161,7 +161,19 @@ fn struct_block(
     out.push_str(&format!("pub struct {name} {{\n"));
 
     let serde = has_serde(&opts.generate.derives);
+    let mut fields: BTreeSet<String> = BTreeSet::new();
     for column in &table.columns {
+        if !fields.insert(naming::ident(&column.name)) {
+            warnings.push(format!(
+                "{}.{}: columns `{}` and another reduce to the same field \
+                 name `{}`; rename one or the generated struct will not \
+                 compile",
+                table.schema,
+                table.name,
+                column.name,
+                naming::ident(&column.name)
+            ));
+        }
         let mapped = typemap::map(&column.ty, &opts.generate.types);
         for import in &mapped.imports {
             imports.insert(import.clone());
@@ -377,6 +389,42 @@ mod tests {
             "{input}"
         );
         assert!(input.contains("pub slug: String,"), "{input}");
+    }
+
+    /// A field name never has to match the column character for
+    /// character — the rename attribute carries that — so it is folded
+    /// to something rustc will not lint on.
+    #[test]
+    fn a_folding_column_is_renamed_not_reproduced() {
+        let generate = Generate::default();
+        let opts = fixture::opts(&generate, Strategy::Embedded);
+        let out = model_file(&fixture::awkward(), &opts, None).code;
+
+        assert!(out.contains("pub mixed_case: Option<i32>,"), "{out}");
+        assert!(out.contains(r#"#[sqlx(rename = "Mixed Case")]"#), "{out}");
+        assert!(out.contains(r#"#[serde(rename = "Mixed Case")]"#), "{out}");
+        // Nothing needs a lint suppressed, so nothing suppresses one.
+        assert!(!out.contains("non_snake_case"), "{out}");
+    }
+
+    #[test]
+    fn colliding_field_names_are_reported() {
+        let generate = Generate::default();
+        let opts = fixture::opts(&generate, Strategy::Embedded);
+        let mut model = fixture::awkward();
+        // `Mixed Case` and `mixed case` both reduce to `mixed_case`.
+        model.table.columns.push(super::super::fixture::column(
+            "mixed case",
+            crate::introspect::PgType::Scalar("text".into()),
+            "text",
+            false,
+        ));
+        let rendered = model_file(&model, &opts, None);
+        assert!(
+            rendered.warnings.iter().any(|w| w.contains("mixed_case")),
+            "{:?}",
+            rendered.warnings
+        );
     }
 
     #[test]

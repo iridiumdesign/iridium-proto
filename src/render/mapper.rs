@@ -9,9 +9,10 @@
 use std::collections::BTreeSet;
 
 use super::plan::{self, Kind, Operation};
-use super::{Opts, Rendered, Strategy, header, import_block};
+use super::{Opts, Rendered, Strategy, escape, header, import_block};
 use crate::introspect::{Column, Model, Table};
 use crate::naming;
+use crate::quoting;
 use crate::typemap;
 
 /// Render the mapper for one table.
@@ -73,7 +74,9 @@ fn method(
     input: &str,
     imports: &mut BTreeSet<String>,
 ) -> String {
-    let sql = statement(table, opts, op);
+    // The statement goes inside a Rust string literal, and a quoted
+    // identifier carries the one character that would end it early.
+    let sql = escape(&statement(table, opts, op));
     match op.kind {
         Kind::Insert => {
             let binds = bind_fields(&table.insert_columns(), "new");
@@ -161,7 +164,7 @@ fn statement(table: &Table, opts: &Opts, op: &Operation) -> String {
         };
     }
 
-    let relation = format!("{}.{}", table.schema, table.name);
+    let relation = quoting::qualified(&table.schema, &table.name);
     match op.kind {
         Kind::Insert => {
             let columns = table.insert_columns();
@@ -186,7 +189,7 @@ fn statement(table: &Table, opts: &Opts, op: &Operation) -> String {
             let sets: Vec<String> = columns
                 .iter()
                 .enumerate()
-                .map(|(i, c)| format!("{} = ${}", c.name, i + 1))
+                .map(|(i, c)| format!("{} = ${}", quoting::ident(&c.name), i + 1))
                 .collect();
             format!(
                 "UPDATE {relation}\n                SET {}\n              WHERE {}\n          RETURNING *",
@@ -263,7 +266,7 @@ fn predicate(columns: &[&Column], start: usize) -> String {
     columns
         .iter()
         .enumerate()
-        .map(|(i, c)| format!("{} = ${}", c.name, start + i))
+        .map(|(i, c)| format!("{} = ${}", quoting::ident(&c.name), start + i))
         .collect::<Vec<_>>()
         .join(" AND ")
 }
@@ -278,7 +281,7 @@ fn placeholders(count: usize) -> String {
 fn names(columns: &[&Column], sep: &str) -> String {
     columns
         .iter()
-        .map(|c| c.name.as_str())
+        .map(|c| quoting::ident(&c.name))
         .collect::<Vec<_>>()
         .join(sep)
 }
@@ -354,6 +357,45 @@ mod tests {
             out.contains("pub async fn find_by_org_id(&self, org_id: Uuid) -> Result<Vec<Product>"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn awkward_identifiers_are_quoted() {
+        let generate = Generate::default();
+        let opts = fixture::opts(&generate, Strategy::Embedded);
+        let out = mapper_file(&fixture::awkward(), &opts).code;
+
+        // The relation is a reserved word, so it cannot go in bare.
+        assert!(out.contains(r#"INSERT INTO shop.\"order\""#), "{out}");
+        assert!(
+            out.contains(r#"DELETE FROM shop.\"order\" WHERE id = $1"#),
+            "{out}"
+        );
+        // So are two of the columns, and one would fold.
+        assert!(
+            out.contains(r#"\"select\", \"Mixed Case\", \"desc\""#),
+            "{out}"
+        );
+        assert!(out.contains(r#"WHERE \"select\" = $1"#), "{out}");
+        // A plain column stays plain — quoting everything would be noise.
+        assert!(out.contains("WHERE id = $1"), "{out}");
+    }
+
+    #[test]
+    fn quoted_sql_survives_the_rust_string_literal() {
+        let generate = Generate::default();
+        let opts = fixture::opts(&generate, Strategy::Embedded);
+        let out = mapper_file(&fixture::awkward(), &opts).code;
+        // Every double quote inside a query string must be escaped, or
+        // the generated file does not parse. Count them per line: a line
+        // holding SQL should have no bare `"` between the delimiters.
+        for line in out.lines().filter(|l| l.contains("order")) {
+            let bare = line
+                .char_indices()
+                .filter(|(i, c)| *c == '"' && *i > 0 && !line[..*i].ends_with('\\'))
+                .count();
+            assert!(bare <= 2, "unescaped quote in generated Rust: {line}");
+        }
     }
 
     #[test]

@@ -50,6 +50,16 @@ file without `--force`.
 memory-safety issues would have to come from a dependency rather than
 from this code.
 
+**Injection.** `tests/injection.rs` covers the three surfaces where a
+name could stop being data: the queries a generated mapper runs (values
+are bound, never interpolated, and nothing is assembled at run time),
+the identifiers proto copies out of the catalogs into SQL text, and the
+Rust string literal that SQL is embedded in. The round trip in
+`scripts/smoke.sh` carries the same thing further: it creates a table
+whose name is an injection payload, alongside a table for that payload
+to destroy, generates and applies the functions, and fails if the
+neighbour is gone. A finding in any of those is in scope.
+
 ## Out of scope
 
 **The database you point it at is trusted.** `proto` reads identifiers,
@@ -62,9 +72,12 @@ equivalent to running their code, and no amount of escaping inside
 that is what stdout is for.
 
 Within that, quoting is a robustness matter rather than a security one.
-Generated SQL writes identifiers unquoted, so a column named `order`, or
-one with a space in it, produces SQL that does not parse. That is a bug
-and I want to know about it; please open a normal public issue.
+Identifiers are quoted where quoting changes the meaning — a reserved
+word, a name Postgres would fold, a name carrying punctuation — and left
+bare where it does not. If you find an identifier that still produces
+SQL that will not parse, or one that escapes the string literal it is
+written into, that is a bug and I want to know about it; please open a
+normal public issue.
 
 **Wrong output is a bug, not a vulnerability.** A Postgres type mapped
 to the wrong Rust type, a nullable column emitted without `Option`, a

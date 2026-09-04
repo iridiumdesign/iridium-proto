@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 
 use crate::introspect::{Column, Table};
 use crate::naming;
+use crate::quoting;
 
 /// What an operation does, which decides its shape on both sides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,7 +153,15 @@ pub(crate) fn joined(columns: &[&Column], sep: &str) -> String {
         .join(sep)
 }
 
-/// The qualified name of a generated function, e.g. `shop.product_insert`.
+/// A generated function's bare name, e.g. `product_insert`. This is the
+/// spelling that goes in `pg_proc.proname`, so it is what the drop block
+/// compares against as a string.
+pub fn function_name(table: &Table, call: &str) -> String {
+    format!("{}_{call}", table.name)
+}
+
+/// A generated function's qualified name as it is written in SQL, e.g.
+/// `shop.product_insert`, quoted where the names need it.
 pub fn function(table: &Table, call: &str) -> String {
-    format!("{}.{}_{call}", table.schema, table.name)
+    quoting::qualified(&table.schema, &function_name(table, call))
 }

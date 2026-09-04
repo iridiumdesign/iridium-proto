@@ -14,6 +14,7 @@
 use super::plan::{self, Kind};
 use super::{Opts, header_with};
 use crate::introspect::{Column, Model, Table};
+use crate::quoting;
 
 /// Render the migration defining a table's CRUD functions.
 ///
@@ -33,7 +34,7 @@ pub fn migration_file(model: &Model, opts: &Opts) -> String {
 
     let names: Vec<String> = ops
         .iter()
-        .map(|op| format!("'{}_{}'", table.name, op.call))
+        .map(|op| quoting::literal(&plan::function_name(table, &op.call)))
         .collect();
 
     sql.push_str(&format!(
@@ -47,13 +48,13 @@ pub fn migration_file(model: &Model, opts: &Opts) -> String {
                  SELECT p.oid::regprocedure AS signature\n          \
                    FROM pg_proc p\n          \
                    JOIN pg_namespace n ON n.oid = p.pronamespace\n         \
-                  WHERE n.nspname = '{}'\n           \
+                  WHERE n.nspname = {}\n           \
                     AND p.proname IN ({})\n    \
              LOOP\n        \
                  EXECUTE format('DROP FUNCTION IF EXISTS %s', fn.signature);\n    \
              END LOOP;\n\
          END $$;\n",
-        table.schema,
+        quoting::literal(&table.schema),
         names.join(", ")
     ));
 
@@ -66,7 +67,7 @@ pub fn migration_file(model: &Model, opts: &Opts) -> String {
 }
 
 fn function(table: &Table, op: &plan::Operation) -> String {
-    let relation = format!("{}.{}", table.schema, table.name);
+    let relation = quoting::qualified(&table.schema, &table.name);
     let name = plan::function(table, &op.call);
 
     let (params, returns, volatility, body) = match op.kind {
@@ -97,7 +98,7 @@ fn function(table: &Table, op: &plan::Operation) -> String {
             let all: Vec<&Column> = op.columns.iter().copied().chain(columns.clone()).collect();
             let sets: Vec<String> = columns
                 .iter()
-                .map(|c| format!("{} = {}", c.name, param(c)))
+                .map(|c| format!("{} = {}", quoting::ident(&c.name), param(c)))
                 .collect();
             (
                 signature(&all),
@@ -162,13 +163,13 @@ fn signature(columns: &[&Column]) -> String {
 /// Parameters are prefixed so a body can never mistake one for the column
 /// of the same name.
 fn param(column: &Column) -> String {
-    format!("p_{}", column.name)
+    quoting::ident(&format!("p_{}", column.name))
 }
 
 fn predicate(columns: &[&Column]) -> String {
     columns
         .iter()
-        .map(|c| format!("{} = {}", c.name, param(c)))
+        .map(|c| format!("{} = {}", quoting::ident(&c.name), param(c)))
         .collect::<Vec<_>>()
         .join("\n       AND ")
 }
@@ -176,7 +177,7 @@ fn predicate(columns: &[&Column]) -> String {
 fn names(columns: &[&Column], sep: &str) -> String {
     columns
         .iter()
-        .map(|c| c.name.as_str())
+        .map(|c| quoting::ident(&c.name))
         .collect::<Vec<_>>()
         .join(sep)
 }
@@ -231,6 +232,28 @@ mod tests {
         assert!(out.contains("nspname = 'shop'"), "{out}");
         // Never a wildcard: 'product_%' would also match product_variant_*.
         assert!(!out.contains("LIKE"), "{out}");
+    }
+
+    #[test]
+    fn awkward_identifiers_are_quoted() {
+        let generate = Generate::default();
+        let opts = fixture::opts(&generate, Strategy::Server);
+        let out = migration_file(&fixture::awkward(), &opts);
+
+        // The relation needs quoting; the function name derived from it
+        // does not, since `order_insert` is not itself a reserved word.
+        assert!(out.contains(r#"RETURNS shop."order""#), "{out}");
+        assert!(
+            out.contains("CREATE OR REPLACE FUNCTION shop.order_insert("),
+            "{out}"
+        );
+        assert!(out.contains(r#"INSERT INTO shop."order""#), "{out}");
+        assert!(out.contains(r#"p_select text"#), "{out}");
+        // A parameter named after a folding column needs quoting too.
+        assert!(out.contains(r#""p_Mixed Case" integer"#), "{out}");
+        // The drop block compares names as literals, not identifiers.
+        assert!(out.contains("'order_insert'"), "{out}");
+        assert!(out.contains("nspname = 'shop'"), "{out}");
     }
 
     #[test]
