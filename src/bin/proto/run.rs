@@ -14,6 +14,7 @@ use iridium_proto::error::{Error, Result};
 use iridium_proto::introspect::{self, Model};
 use iridium_proto::naming;
 use iridium_proto::output::{self, Migration};
+use iridium_proto::render::python::Group;
 use iridium_proto::render::{self, Opts, Rendered, Strategy};
 
 use crate::{Cli, Command, SqlStrategy};
@@ -76,6 +77,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             schema,
             pyo3,
             mappers,
+            pymodule,
             out_dir,
             mapper_dir,
             no_mod,
@@ -86,7 +88,20 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             match out_dir {
                 Some(dir) => {
                     let mappers = mapper_target(&cli, *mappers, mapper_dir.as_deref())?;
-                    write_schema(&models, schema, &opts, dir, mappers, *no_mod, *force)
+                    let python = python_target(pymodule.as_deref(), *pyo3)?;
+                    if let Some(name) = python {
+                        let groups = [Group {
+                            schema: schema.clone(),
+                            path: "super".to_string(),
+                            models: &models,
+                        }];
+                        let code = render::python::pymodule_file(name, &groups, &opts);
+                        output::write_file(&dir.join("python.rs"), &code, *force)?;
+                    }
+                    let feature = python.map(|_| opts.generate.pyo3_feature.as_str());
+                    write_schema(
+                        &models, schema, &opts, dir, mappers, feature, *no_mod, *force,
+                    )
                 }
                 None if *mappers => Err(Error::Usage(
                     "--mappers needs --out-dir and --mapper-dir".to_string(),
@@ -102,6 +117,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
         Command::Database {
             pyo3,
             mappers,
+            pymodule,
             out_dir,
             mapper_dir,
             no_mod,
@@ -109,7 +125,9 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
         } => {
             let opts = options(&cli, &generate, &target, *pyo3, *mappers, None);
             let mappers = mapper_target(&cli, *mappers, mapper_dir.as_deref())?;
+            let python = python_target(pymodule.as_deref(), *pyo3)?;
             let mut written = Vec::new();
+            let mut groups = Vec::new();
 
             for schema in introspect::schemas(&pool).await? {
                 if generate.exclude_schemas.iter().any(|s| s == &schema) {
@@ -133,17 +151,33 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
                     &opts,
                     &out_dir.join(&module),
                     per_schema.as_ref().map(|(d, m)| (d.as_path(), *m)),
+                    None,
                     *no_mod,
                     *force,
                 )?;
+                groups.push((schema.clone(), module.clone(), models));
                 written.push(module);
             }
 
+            if let Some(name) = python {
+                let groups: Vec<Group> = groups
+                    .iter()
+                    .map(|(schema, module, models)| Group {
+                        schema: schema.clone(),
+                        path: format!("super::{module}"),
+                        models,
+                    })
+                    .collect();
+                let code = render::python::pymodule_file(name, &groups, &opts);
+                output::write_file(&out_dir.join("python.rs"), &code, *force)?;
+            }
+
             if !*no_mod && !written.is_empty() {
-                let code = render::model::mod_file(&written, "database", &opts);
+                let feature = python.map(|_| opts.generate.pyo3_feature.as_str());
+                let code = render::model::mod_file(&written, "database", &opts, feature);
                 output::write_file(&out_dir.join("mod.rs"), &code, *force)?;
                 if let Some((dir, _)) = mappers {
-                    let code = render::model::mod_file(&written, "database", &opts);
+                    let code = render::model::mod_file(&written, "database", &opts, None);
                     output::write_file(&dir.join("mod.rs"), &code, *force)?;
                 }
             }
@@ -303,6 +337,17 @@ fn mapper_target<'a>(
     Ok(Some((dir, migrations)))
 }
 
+/// A `#[pymodule]` is only meaningful over classes that carry pyo3
+/// attributes, so it needs `--pyo3` to have been asked for too.
+fn python_target(name: Option<&str>, pyo3: bool) -> Result<Option<&str>> {
+    match name {
+        Some(_) if !pyo3 => Err(Error::Usage(
+            "--pymodule needs --pyo3: there would be no classes to register".to_string(),
+        )),
+        other => Ok(other),
+    }
+}
+
 fn migrations_dir(cli: &Cli) -> Result<&Path> {
     cli.migrations_dir
         .as_deref()
@@ -324,6 +369,7 @@ fn write_schema(
     opts: &Opts,
     dir: &Path,
     mappers: Option<(&Path, Option<&Path>)>,
+    python: Option<&str>,
     no_mod: bool,
     force: bool,
 ) -> Result<()> {
@@ -347,7 +393,7 @@ fn write_schema(
     }
 
     if !no_mod {
-        let code = render::model::mod_file(&modules, schema, opts);
+        let code = render::model::mod_file(&modules, schema, opts, python);
         output::write_file(&dir.join("mod.rs"), &code, force)?;
     }
     eprintln!("wrote {} models to {}", models.len(), dir.display());
@@ -365,7 +411,7 @@ fn write_schema(
             written.push(module);
         }
         if !no_mod {
-            let code = render::model::mod_file(&written, schema, opts);
+            let code = render::model::mod_file(&written, schema, opts, None);
             output::write_file(&mapper_dir.join("mod.rs"), &code, force)?;
         }
         eprintln!(

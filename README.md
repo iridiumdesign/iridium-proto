@@ -452,6 +452,44 @@ re-exports the ones its struct names, so `model::item::ItemStatus`
 resolves for whoever holds an `Item` and nobody has to know where proto
 filed it.
 
+`--pymodule <name>` writes the registration too, so nothing about the
+crossing is hand-maintained:
+
+```
+proto schema shop --pyo3 --pymodule shop --out-dir src/model
+```
+
+```rust
+/// Register every generated class in `shop` on a module.
+pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<super::enums::ProductStatus>()?;
+    m.add_class::<super::product::Product>()?;
+    Ok(())
+}
+
+/// The classes as an extension module, for when that is all you need.
+#[pymodule]
+pub fn shop(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    register(m)
+}
+```
+
+It lands as `python.rs` beside the models, and the generated `mod.rs`
+declares it behind the pyo3 feature. An extension has room for exactly
+one module initialiser, so when yours needs functions of its own — a
+mapper-backed query, say — write your own `#[pymodule]` and call
+`register` from it rather than listing classes by hand.
+
+`proto database --pymodule <name>` does the same across schemas, one
+Python submodule each, registered in `sys.modules` so both
+`import store.shop` and `from store.shop import Product` work. Two
+schemas may hold a table of the same name without colliding, which is
+why the classes are named by full path rather than imported.
+
+The `#[pymodule]` does not have to sit at the crate root — pyo3 exports
+its initialiser from a nested module just as well — so a consumer needs
+no glue at all beyond declaring the module.
+
 Everything crosses as the native Python type, and keeps the schema's
 guarantees on the far side:
 

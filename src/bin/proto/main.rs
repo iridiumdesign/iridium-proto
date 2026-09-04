@@ -135,6 +135,11 @@ pub enum Command {
         #[arg(long)]
         mappers: bool,
 
+        /// Also generate a `#[pymodule]` registering every class, under
+        /// this name; requires --pyo3 and --out-dir
+        #[arg(long, value_name = "NAME")]
+        pymodule: Option<String>,
+
         /// Write one model file per table into this directory
         #[arg(long, value_name = "DIR")]
         out_dir: Option<PathBuf>,
@@ -161,6 +166,11 @@ pub enum Command {
         /// Also generate mappers; requires --mapper-dir
         #[arg(long)]
         mappers: bool,
+
+        /// Also generate a `#[pymodule]` registering every class, under
+        /// this name; requires --pyo3
+        #[arg(long, value_name = "NAME")]
+        pymodule: Option<String>,
 
         /// Root directory for the generated models
         #[arg(long, value_name = "DIR")]

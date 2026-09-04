@@ -118,10 +118,18 @@ pub fn enums_file(models: &[Model], schema: &str, opts: &Opts) -> Rendered {
 }
 
 /// A `mod.rs` declaring the generated modules.
-pub fn mod_file(modules: &[String], source: &str, opts: &Opts) -> String {
+///
+/// `python` names the Cargo feature that gates a generated `#[pymodule]`
+/// sitting beside them, if one was generated.
+pub fn mod_file(modules: &[String], source: &str, opts: &Opts, python: Option<&str>) -> String {
     let mut code = header(opts, source, "module list");
     for m in modules {
         code.push_str(&format!("pub mod {};\n", naming::ident(m)));
+    }
+    if let Some(feature) = python {
+        code.push_str(&format!(
+            "\n#[cfg(feature = \"{feature}\")]\npub mod python;\n"
+        ));
     }
     code
 }

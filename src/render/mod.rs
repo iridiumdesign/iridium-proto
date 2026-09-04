@@ -18,6 +18,7 @@ pub(crate) mod fixture;
 pub mod mapper;
 pub mod model;
 pub mod plan;
+pub mod python;
 pub mod sql;
 
 /// Which SQL the mapper runs.

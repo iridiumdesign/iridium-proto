@@ -59,9 +59,10 @@ CREATE TABLE $SCHEMA.item (
 );
 SQL
 
-say "generating models with --pyo3"
+say "generating models with --pyo3 and a #[pymodule]"
 mkdir -p "$WORK/src/model" "$WORK/.cargo"
-"$PROTO" --db "$TARGET" schema "$SCHEMA" --pyo3 --out-dir "$WORK/src/model"
+"$PROTO" --db "$TARGET" schema "$SCHEMA" --pyo3 --pymodule protopy \
+    --out-dir "$WORK/src/model"
 
 say "building an extension module from them"
 cat > "$WORK/Cargo.toml" <<'TOML'
@@ -71,7 +72,7 @@ version = "0.0.0"
 edition = "2024"
 
 [lib]
-name = "protopy"
+name = "protopy_test"
 crate-type = ["cdylib"]
 
 [features]
@@ -98,8 +99,13 @@ rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
 rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
 TOML
 
-# The glue a consumer writes: hand Python an object built on the Rust
-# side, the way a mapper hands one back after a query.
+# What a consumer writes when the extension needs functions of its own:
+# their own module, calling the generated `register` rather than listing
+# the classes by hand. `sample` stands in for a mapper handing an object
+# back after a query, since generated structs have no constructor.
+#
+# The generated `#[pymodule] protopy` is compiled too, and is what a
+# consumer who needs nothing else would import directly.
 cat > "$WORK/src/lib.rs" <<'RUST'
 use pyo3::prelude::*;
 use rust_decimal::Decimal;
@@ -122,9 +128,8 @@ fn sample() -> Item {
 }
 
 #[pymodule]
-fn protopy(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<Item>()?;
-    m.add_class::<ItemStatus>()?;
+fn protopy_test(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    model::python::register(m)?;
     m.add_function(wrap_pyfunction!(sample, m)?)?;
     Ok(())
 }
@@ -132,13 +137,22 @@ RUST
 
 (cd "$WORK" && cargo build --quiet --features python)
 
-# Name the artifact what this interpreter will import.
+# Name the artifact what this interpreter will import. Where cargo put
+# it depends on CARGO_TARGET_DIR, which CI sets so the build is cached;
+# what it is called depends on the platform.
 SUFFIX=$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))')
-if [ -f "$WORK/target/debug/libprotopy.dylib" ]; then
-    cp "$WORK/target/debug/libprotopy.dylib" "$WORK/protopy$SUFFIX"
-else
-    cp "$WORK/target/debug/libprotopy.so" "$WORK/protopy$SUFFIX"
+BUILT=""
+for candidate in \
+    "${CARGO_TARGET_DIR:-$WORK/target}/debug/libprotopy_test.dylib" \
+    "${CARGO_TARGET_DIR:-$WORK/target}/debug/libprotopy_test.so"
+do
+    [ -f "$candidate" ] && BUILT="$candidate" && break
+done
+if [ -z "$BUILT" ]; then
+    echo "  built no extension module under ${CARGO_TARGET_DIR:-$WORK/target}" >&2
+    exit 1
 fi
+cp "$BUILT" "$WORK/protopy_test$SUFFIX"
 
 say "importing it and using the object"
 (cd "$WORK" && python3 - <<'PY'
@@ -146,7 +160,11 @@ import datetime
 import decimal
 import uuid
 
-import protopy
+import protopy_test as protopy
+
+# Registered by the generated `register`, not by hand.
+assert hasattr(protopy, "Item") and hasattr(protopy, "ItemStatus")
+print("  classes registered by the generated module")
 
 it = protopy.sample()
 
