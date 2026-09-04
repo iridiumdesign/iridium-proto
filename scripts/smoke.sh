@@ -192,6 +192,50 @@ SELECT count(*) AS remaining FROM $SCHEMA.item_list();
 ROLLBACK;
 SQL
 
+say "changing the schema, and asking whether the tree noticed"
+psql -q -v ON_ERROR_STOP=1 -c "ALTER TABLE $SCHEMA.item ADD COLUMN extra text;"
+
+# --check writes nothing and exits non-zero when the tree has fallen
+# behind. `if !` rather than a bare call, because set -e would take a
+# non-zero exit as the script failing.
+if "$PROTO" --db "$TARGET" schema "$SCHEMA" --pyo3 --mappers \
+        --out-dir "$WORK/src/model" --mapper-dir "$WORK/src/mapper" \
+        --check >"$WORK/check.log" 2>&1
+then
+    echo "  --check passed on a schema that had changed" >&2
+    exit 1
+fi
+grep -q -- '+extra' "$WORK/check.log" || {
+    echo "  --check did not name the new column" >&2
+    cat "$WORK/check.log" >&2
+    exit 1
+}
+echo "  reported the drift, and named the column"
+
+"$PROTO" --db "$TARGET" schema "$SCHEMA" --pyo3 --mappers \
+    --out-dir "$WORK/src/model" --mapper-dir "$WORK/src/mapper" >/dev/null 2>&1
+"$PROTO" --db "$TARGET" schema "$SCHEMA" --pyo3 --mappers \
+    --out-dir "$WORK/src/model" --mapper-dir "$WORK/src/mapper" --check >/dev/null 2>&1 || {
+    echo "  still out of step after regenerating" >&2
+    exit 1
+}
+echo "  back in step, and quiet"
+
+say "dropping a table: --prune should take back what proto put there"
+printf 'pub fn helper() {}\n' > "$WORK/src/model/handwritten.rs"
+psql -q -v ON_ERROR_STOP=1 -c "DROP TABLE $SCHEMA.\"order\" CASCADE;"
+"$PROTO" --db "$TARGET" schema "$SCHEMA" --pyo3 --mappers --prune \
+    --out-dir "$WORK/src/model" --mapper-dir "$WORK/src/mapper" >/dev/null 2>&1
+[ ! -f "$WORK/src/model/order.rs" ] || {
+    echo "  the dropped table's model is still there" >&2
+    exit 1
+}
+[ -f "$WORK/src/model/handwritten.rs" ] || {
+    echo "  --prune removed a file proto did not generate" >&2
+    exit 1
+}
+echo "  pruned the model, kept the hand-written file"
+
 say "regenerating: the migrations should be left alone"
 "$PROTO" --db "$TARGET" --sql server --migrations-dir "$WORK/migrations" \
     schema "$SCHEMA" --mappers \

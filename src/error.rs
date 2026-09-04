@@ -114,6 +114,10 @@ pub enum Error {
         path: PathBuf,
     },
 
+    /// `--check` found the tree out of step with the database.
+    #[error("the generated tree is not in step with the database")]
+    Drift,
+
     /// The flags given do not go together.
     #[error("{0}")]
     Usage(String),

@@ -13,7 +13,7 @@ use iridium_proto::config::{self, Config, Generate, Target};
 use iridium_proto::error::{Error, Result};
 use iridium_proto::introspect::{self, Model};
 use iridium_proto::naming;
-use iridium_proto::output::{self, Migration};
+use iridium_proto::output::{self, Journal, Migration};
 use iridium_proto::render::python::Group;
 use iridium_proto::render::{self, Opts, Rendered, Strategy};
 
@@ -29,7 +29,30 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
 
     let (target, generate) = resolve(&cli, &path, file)?;
     let pool = connect(&target).await?;
+    let mut journal = Journal::new(cli.check);
 
+    let outcome = run(&cli, &pool, &target, &generate, &mut journal).await;
+
+    // A run that touched files says what it did, even when it failed
+    // partway: knowing which half landed is the point of the summary.
+    if !journal.summary().is_empty() {
+        eprint!("{}", journal.summary());
+    }
+    outcome?;
+
+    if cli.check && journal.changed() {
+        return Err(Error::Drift);
+    }
+    Ok(())
+}
+
+async fn run(
+    cli: &Cli,
+    pool: &PgPool,
+    target: &Target,
+    generate: &Generate,
+    journal: &mut Journal,
+) -> Result<()> {
     match &cli.command {
         Command::Model {
             table,
@@ -39,10 +62,11 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             name,
             force,
         } => {
-            let (schema, relation) = split_ref(table, default_schema(&target, &generate))?;
-            let model = introspect::model(&pool, &schema, &relation).await?;
-            let opts = options(&cli, &generate, &target, *pyo3, *input, name.clone());
+            let (schema, relation) = split_ref(table, default_schema(target, generate))?;
+            let model = introspect::model(pool, &schema, &relation).await?;
+            let opts = options(cli, generate, target, *pyo3, *input, name.clone());
             emit(
+                journal,
                 render::model::model_file(&model, &opts, None),
                 out.as_deref(),
                 *force,
@@ -55,18 +79,20 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             name,
             force,
         } => {
-            let (schema, relation) = split_ref(table, default_schema(&target, &generate))?;
-            let model = introspect::model(&pool, &schema, &relation).await?;
-            let opts = options(&cli, &generate, &target, false, true, name.clone());
+            let (schema, relation) = split_ref(table, default_schema(target, generate))?;
+            let model = introspect::model(pool, &schema, &relation).await?;
+            let opts = options(cli, generate, target, false, true, name.clone());
             if opts.strategy == Strategy::Server {
-                let dir = migrations_dir(&cli)?;
+                let dir = migrations_dir(cli)?;
                 report(output::write_migration(
+                    journal,
                     dir,
                     &migration_slug(&model),
                     &render::sql::migration_file(&model, &opts),
                 )?);
             }
             emit(
+                journal,
                 render::mapper::mapper_file(&model, &opts),
                 out.as_deref(),
                 *force,
@@ -80,14 +106,15 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             pymodule,
             out_dir,
             mapper_dir,
+            prune,
             no_mod,
             force,
         } => {
-            let models = read_schema(&pool, schema, &generate).await?;
-            let opts = options(&cli, &generate, &target, *pyo3, *mappers, None);
+            let models = read_schema(pool, schema, generate).await?;
+            let opts = options(cli, generate, target, *pyo3, *mappers, None);
             match out_dir {
                 Some(dir) => {
-                    let mappers = mapper_target(&cli, *mappers, mapper_dir.as_deref())?;
+                    let mappers = mapper_target(cli, *mappers, mapper_dir.as_deref())?;
                     let python = python_target(pymodule.as_deref(), *pyo3)?;
                     if let Some(name) = python {
                         let groups = [Group {
@@ -96,17 +123,19 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
                             models: &models,
                         }];
                         let code = render::python::pymodule_file(name, &groups, &opts);
-                        output::write_file(&dir.join("python.rs"), &code, *force)?;
+                        journal.write(&dir.join("python.rs"), &code, *force)?;
                     }
                     let feature = python.map(|_| opts.generate.pyo3_feature.as_str());
                     write_schema(
-                        &models, schema, &opts, dir, mappers, feature, *no_mod, *force,
+                        journal, &models, schema, &opts, dir, mappers, feature, *prune, *no_mod,
+                        *force,
                     )
                 }
                 None if *mappers => Err(Error::Usage(
                     "--mappers needs --out-dir and --mapper-dir".to_string(),
                 )),
                 None => emit(
+                    journal,
                     render::model::schema_file(&models, schema, &opts),
                     None,
                     *force,
@@ -120,20 +149,21 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             pymodule,
             out_dir,
             mapper_dir,
+            prune,
             no_mod,
             force,
         } => {
-            let opts = options(&cli, &generate, &target, *pyo3, *mappers, None);
-            let mappers = mapper_target(&cli, *mappers, mapper_dir.as_deref())?;
+            let opts = options(cli, generate, target, *pyo3, *mappers, None);
+            let mappers = mapper_target(cli, *mappers, mapper_dir.as_deref())?;
             let python = python_target(pymodule.as_deref(), *pyo3)?;
             let mut written = Vec::new();
             let mut groups = Vec::new();
 
-            for schema in introspect::schemas(&pool).await? {
+            for schema in introspect::schemas(pool).await? {
                 if generate.exclude_schemas.iter().any(|s| s == &schema) {
                     continue;
                 }
-                let models = read_schema(&pool, &schema, &generate).await?;
+                let models = read_schema(pool, &schema, generate).await?;
                 if models.is_empty() {
                     continue;
                 }
@@ -146,12 +176,14 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
                 // in the one directory, numbered in sequence.
                 let per_schema = mappers.map(|(dir, migrations)| (dir.join(&module), migrations));
                 write_schema(
+                    journal,
                     &models,
                     &schema,
                     &opts,
                     &out_dir.join(&module),
                     per_schema.as_ref().map(|(d, m)| (d.as_path(), *m)),
                     None,
+                    *prune,
                     *no_mod,
                     *force,
                 )?;
@@ -169,31 +201,30 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
                     })
                     .collect();
                 let code = render::python::pymodule_file(name, &groups, &opts);
-                output::write_file(&out_dir.join("python.rs"), &code, *force)?;
+                journal.write(&out_dir.join("python.rs"), &code, *force)?;
             }
 
             if !*no_mod && !written.is_empty() {
                 let feature = python.map(|_| opts.generate.pyo3_feature.as_str());
                 let code = render::model::mod_file(&written, "database", &opts, feature);
-                output::write_file(&out_dir.join("mod.rs"), &code, *force)?;
+                journal.write(&out_dir.join("mod.rs"), &code, *force)?;
                 if let Some((dir, _)) = mappers {
                     let code = render::model::mod_file(&written, "database", &opts, None);
-                    output::write_file(&dir.join("mod.rs"), &code, *force)?;
+                    journal.write(&dir.join("mod.rs"), &code, *force)?;
                 }
             }
-            eprintln!("wrote {} schemas to {}", written.len(), out_dir.display());
             Ok(())
         }
 
         Command::List { schema } => match schema {
             Some(schema) => {
-                for table in introspect::tables(&pool, schema).await? {
+                for table in introspect::tables(pool, schema).await? {
                     println!("{schema}.{table}");
                 }
                 Ok(())
             }
             None => {
-                for schema in introspect::schemas(&pool).await? {
+                for schema in introspect::schemas(pool).await? {
                     if !generate.exclude_schemas.iter().any(|s| s == &schema) {
                         println!("{schema}");
                     }
@@ -364,12 +395,14 @@ fn migration_slug(model: &Model) -> String {
 
 #[allow(clippy::too_many_arguments)]
 fn write_schema(
+    journal: &mut Journal,
     models: &[Model],
     schema: &str,
     opts: &Opts,
     dir: &Path,
     mappers: Option<(&Path, Option<&Path>)>,
     python: Option<&str>,
+    prune: bool,
     no_mod: bool,
     force: bool,
 ) -> Result<()> {
@@ -378,7 +411,7 @@ fn write_schema(
     let mut modules = Vec::new();
     if enum_path.is_some() {
         let rendered = render::model::enums_file(models, schema, opts);
-        output::write_file(&dir.join("enums.rs"), &rendered.code, force)?;
+        journal.write(&dir.join("enums.rs"), &rendered.code, force)?;
         modules.push("enums".to_string());
     }
 
@@ -388,22 +421,27 @@ fn write_schema(
             output::warn(warning);
         }
         let module = naming::ident(&model.table.name);
-        output::write_file(&dir.join(format!("{module}.rs")), &rendered.code, force)?;
+        journal.write(&dir.join(format!("{module}.rs")), &rendered.code, force)?;
         modules.push(module);
     }
 
     if !no_mod {
         let code = render::model::mod_file(&modules, schema, opts, python);
-        output::write_file(&dir.join("mod.rs"), &code, force)?;
+        journal.write(&dir.join("mod.rs"), &code, force)?;
     }
-    eprintln!("wrote {} models to {}", models.len(), dir.display());
+    if prune {
+        let mut kept: Vec<String> = modules.iter().map(|m| format!("{m}.rs")).collect();
+        kept.push("mod.rs".to_string());
+        kept.push("python.rs".to_string());
+        prune_dir(journal, dir, &kept)?;
+    }
 
     if let Some((mapper_dir, migrations)) = mappers {
         let mut written = Vec::new();
         for model in models {
             let rendered = render::mapper::mapper_file(model, opts);
             let module = naming::ident(&model.table.name);
-            output::write_file(
+            journal.write(
                 &mapper_dir.join(format!("{module}.rs")),
                 &rendered.code,
                 force,
@@ -412,17 +450,18 @@ fn write_schema(
         }
         if !no_mod {
             let code = render::model::mod_file(&written, schema, opts, None);
-            output::write_file(&mapper_dir.join("mod.rs"), &code, force)?;
+            journal.write(&mapper_dir.join("mod.rs"), &code, force)?;
         }
-        eprintln!(
-            "wrote {} mappers to {}",
-            written.len(),
-            mapper_dir.display()
-        );
+        if prune {
+            let mut kept: Vec<String> = written.iter().map(|m| format!("{m}.rs")).collect();
+            kept.push("mod.rs".to_string());
+            prune_dir(journal, mapper_dir, &kept)?;
+        }
 
         if let Some(migrations) = migrations {
             for model in models {
                 report(output::write_migration(
+                    journal,
                     migrations,
                     &migration_slug(model),
                     &render::sql::migration_file(model, opts),
@@ -431,6 +470,34 @@ fn write_schema(
         }
     }
 
+    Ok(())
+}
+
+/// Remove generated files in `dir` that are not in `kept`.
+///
+/// Only files carrying the generated marker are touched, so a directory
+/// someone also keeps hand-written code in survives a prune intact.
+fn prune_dir(journal: &mut Journal, dir: &Path, kept: &[String]) -> Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(Error::ReadFile {
+                path: dir.to_path_buf(),
+                source,
+            });
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if path.extension().is_some_and(|e| e == "rs") && !kept.iter().any(|k| k == name) {
+            journal.remove(&path)?;
+        }
+    }
     Ok(())
 }
 
@@ -443,16 +510,17 @@ fn report(migration: Migration) {
     }
 }
 
-fn emit(rendered: Rendered, out: Option<&Path>, force: bool) -> Result<()> {
+fn emit(journal: &mut Journal, rendered: Rendered, out: Option<&Path>, force: bool) -> Result<()> {
     for warning in &rendered.warnings {
         output::warn(warning);
     }
     match out {
         Some(path) => {
-            output::write_file(path, &rendered.code, force)?;
-            eprintln!("wrote {}", path.display());
+            journal.write(path, &rendered.code, force)?;
             Ok(())
         }
+        // Nothing to compare against and nothing to keep in step, so a
+        // stream is written whatever `--check` says.
         None => output::write_stdout(&rendered.code),
     }
 }

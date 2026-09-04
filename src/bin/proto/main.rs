@@ -55,6 +55,12 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "DIR")]
     migrations_dir: Option<PathBuf>,
 
+    /// Write nothing; report what regenerating would change and exit
+    /// non-zero if anything would. For asking whether a tree has fallen
+    /// behind its database
+    #[arg(long, global = true)]
+    check: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -148,6 +154,10 @@ pub enum Command {
         #[arg(long, value_name = "DIR")]
         mapper_dir: Option<PathBuf>,
 
+        /// Delete files proto generated for relations that are gone
+        #[arg(long)]
+        prune: bool,
+
         /// Skip the generated mod.rs
         #[arg(long)]
         no_mod: bool,
@@ -179,6 +189,10 @@ pub enum Command {
         /// Root directory for the generated mappers
         #[arg(long, value_name = "DIR")]
         mapper_dir: Option<PathBuf>,
+
+        /// Delete files proto generated for relations that are gone
+        #[arg(long)]
+        prune: bool,
 
         /// Skip the generated mod.rs files
         #[arg(long)]

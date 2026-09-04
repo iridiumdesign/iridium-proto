@@ -103,6 +103,12 @@ the catalog queries, run it before you send the patch — the unit tests
 prove proto emits the text it means to, and only this proves the text is
 real.
 
+The round trip also covers the update cycle: it changes the schema under
+a generated tree, checks that `--check` notices and names the new column,
+regenerates, and checks the tree goes quiet again. Then it drops a table
+and checks `--prune` takes back the model without touching a
+hand-written file beside it.
+
 `just python` is the same argument for the `--pyo3` output: it builds an
 extension module from generated models and drives it from an
 interpreter. Run it if you touch anything pyo3.
