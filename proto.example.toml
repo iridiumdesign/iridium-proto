@@ -1,8 +1,9 @@
 # proto configuration
 #
 # Read from $PROTO_CONFIG, else $XDG_CONFIG_HOME/proto/proto.toml, else
-# ~/.config/proto/proto.toml. The [databases.*] shape matches steward.toml,
-# so PROTO_CONFIG can point straight at an existing steward config.
+# ~/.config/proto/proto.toml. Unknown keys in a [databases.*] table are
+# ignored, so PROTO_CONFIG can point straight at a config written for
+# another tool.
 
 # Target used when --db is omitted. Unnecessary when exactly one database
 # is defined below — that one is the default.
@@ -11,15 +12,15 @@ default_db = "dev"
 [databases.dev]
 host = "localhost"
 port = 5432
-name = "canopy"
-user = "canopy"
+name = "shop"
+user = "shop"
 password = "devpass"
-# password_file = "/run/secrets/canopy_db_pass"
-# password_env  = "CANOPY_DB_PASS"
-# schema = "canopy"          # default schema for an unqualified table
+# password_file = "/run/secrets/shop_db_pass"
+# password_env  = "SHOP_DB_PASS"
+# schema = "shop"            # default schema for an unqualified table
 
-[databases.hive]
-url = "postgres://canopy@hive/canopy"
+[databases.staging]
+url = "postgres://shop@staging.example.com/shop"
 
 [generate]
 derives = ["sqlx::FromRow", "Debug", "Clone", "Serialize", "Deserialize"]
@@ -27,6 +28,7 @@ enum_derives = [
     "sqlx::Type", "Debug", "Clone", "Copy",
     "PartialEq", "Eq", "Serialize", "Deserialize",
 ]
+input_derives = ["Debug", "Clone", "Serialize", "Deserialize"]
 pyo3_feature = "python"
 default_schema = "public"
 exclude_tables = ["_sqlx_migrations"]

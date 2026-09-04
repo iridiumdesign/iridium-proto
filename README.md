@@ -1,28 +1,26 @@
 # iridium-proto
 
-`proto` reads a live PostgreSQL database and writes the Rust models for
-it — one table at a time, a whole schema, or the entire database organized
-by schema.
+`proto` reads a live PostgreSQL database and writes the Rust for it —
+the models, and the mappers that query them. One table at a time, a whole
+schema, or the entire database organized by schema.
 
 ```
-proto model arboreal.species --pyo3
+proto model shop.product --pyo3
 ```
 
-Output goes to stdout by default, which is the point: from Neovim,
-`:%!proto model arboreal.species --pyo3` replaces the buffer with the
+Output goes to stdout by default, which is the point: from an editor,
+`:%!proto model shop.product --pyo3` replaces the buffer with the
 generated model, and `:r !proto ...` drops it in below the cursor. Pass
 `-o` or `--out-dir` when you want files instead.
-
-Phase one generates row structs and the enum types they reference. Mappers
-come next.
 
 ## Install
 
 ```
-cargo install --path .
+cargo install iridium-proto
 ```
 
-The binary is `proto`. The library is `iridium-proto`.
+The binary is `proto`. The library is `iridium-proto`, so the same work
+can be done from a build script or a test.
 
 ## Configuration
 
@@ -33,28 +31,26 @@ See `proto.example.toml` for the full file.
 ```toml
 [databases.dev]
 host = "localhost"
-name = "canopy"
-user = "canopy"
+name = "shop"
+user = "shop"
 password = "devpass"
 ```
 
 Select a target with `--db dev`. When the file defines **exactly one**
-database, that one is the default and `--db` is unnecessary; with more than
-one, set `default_db` or pass `--db`.
+database, that one is the default and `--db` is unnecessary; with more
+than one, set `default_db` or pass `--db`.
 
-The `[databases.*]` shape is compatible with Canopy's `steward.toml` —
-unknown keys such as `superuser` are ignored — so an existing steward
-config works as is:
+Unknown keys in a `[databases.*]` table are ignored, so a config written
+for another tool can be pointed at directly rather than copied:
 
 ```
-export PROTO_CONFIG=~/.config/steward/steward.toml
-proto --db dev model arboreal.species
+PROTO_CONFIG=~/.config/other-tool/other.toml proto --db dev list
 ```
 
 Passwords resolve in this order: `password`, `password_file`,
-`password_env`, `$PGPASSWORD`, `~/.pgpass` (or `$PGPASSFILE`). A target may
-also carry a single `url`, and `--url` or `$DATABASE_URL` skips the config
-file entirely.
+`password_env`, `$PGPASSWORD`, `~/.pgpass` (or `$PGPASSFILE`). A target
+may also carry a single `url`, and `--url` or `$DATABASE_URL` skips the
+config file entirely.
 
 `proto config` prints the resolved file, its targets, and the generation
 defaults.
@@ -63,48 +59,59 @@ defaults.
 
 ```
 proto model <schema.table>   Generate one model
+proto mapper <schema.table>  Generate one mapper
 proto schema <schema>        Generate every model in a schema
 proto database               Generate every schema, one directory each
 proto list [schema]          List schemas, or the tables in one schema
 proto config                 Show the resolved config
 ```
 
-Common flags:
-
 | Flag | Applies to | Effect |
 |---|---|---|
 | `--db <target>` | all | Database target from the config file |
 | `--url <url>` | all | Connection string, bypassing the config |
 | `--config <path>` | all | Config file to read |
-| `--pyo3` | generators | Emit feature-gated pyo3 attributes |
-| `-o, --out <file>` | `model` | Write to a file instead of stdout |
-| `--out-dir <dir>` | `schema`, `database` | Write one file per table |
-| `--name <name>` | `model` | Struct name, overriding the derived one |
-| `--no-mod` | `schema`, `database` | Skip the generated `mod.rs` |
+| `--sql <where>` | mappers | `embedded` (default) or `server` |
+| `--model-path <path>` | mappers | Module the mappers import models from |
+| `--migrations-dir <dir>` | `--sql server` | Where the migrations go |
+| `--pyo3` | models | Emit feature-gated pyo3 attributes |
+| `--input` | `model` | Also emit the `New…` insert type |
+| `-o, --out <file>` | single | Write to a file instead of stdout |
+| `--out-dir <dir>` | bulk | Write one model file per table |
+| `--mappers` | bulk | Also generate mappers |
+| `--mapper-dir <dir>` | bulk | Write one mapper file per table |
+| `--name <name>` | single | Struct name, overriding the derived one |
+| `--no-mod` | bulk | Skip the generated `mod.rs` |
 | `--force` | writers | Overwrite a file proto did not generate |
 
 `proto schema` without `--out-dir` writes one flat stream: the schema's
 enum types once, then a struct per table. With `--out-dir` it writes
-`<table>.rs` per table, an `enums.rs` when the schema uses enum types, and
-a `mod.rs`. `proto database` does the same one directory per schema, plus a
-top-level `mod.rs`.
+`<table>.rs` per table, an `enums.rs` when the schema uses enum types,
+and a `mod.rs`. `proto database` does the same one directory per schema,
+plus a top-level `mod.rs`.
 
-Generated files carry an `@generated by proto` header. Writing over a file
-that lacks it fails unless you pass `--force`, so a hand-written model is
-never clobbered by a stray `--out-dir`.
+A full tree, models and mappers side by side:
 
-## What it emits
+```
+proto database --mappers --out-dir src/model --mapper-dir src/mapper
+```
+
+Generated files carry an `@generated by proto` header. Writing over a
+file that lacks it fails unless you pass `--force`, so a hand-written
+model is never clobbered by a stray `--out-dir`.
+
+## Models
 
 A table becomes one struct, named by re-casing the table name —
-`member_units` becomes `MemberUnits`. No singularization; use `--name` when
-that reads wrong. `NOT NULL` columns get a bare type, everything else gets
-`Option`. Column and table comments become doc comments, and the primary
-key is noted above the struct.
+`order_items` becomes `OrderItems`. No singularization; use `--name` when
+that reads wrong. `NOT NULL` columns get a bare type, everything else
+gets `Option`. Column and table comments become doc comments, and the
+primary key is noted above the struct.
 
 ```rust
 // @generated by proto 0.1.0 — do not edit by hand.
-// source: dev · arboreal.species (table)
-// regenerate: proto model arboreal.species --db dev
+// source: dev · shop.product (table)
+// regenerate: proto model shop.product --db dev
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -112,11 +119,13 @@ use uuid::Uuid;
 
 /// Primary key: `id`.
 #[derive(sqlx::FromRow, Debug, Clone, Serialize, Deserialize)]
-pub struct Species {
+pub struct Product {
     pub id: Uuid,
-    pub common_name: String,
-    pub genus: Option<String>,
-    pub sun_exposure: Option<Vec<String>>,
+    /// Stable external identifier.
+    pub slug: String,
+    pub name: String,
+    pub status: ProductStatus,
+    pub price: Option<Decimal>,
     pub created_at: DateTime<Utc>,
 }
 ```
@@ -128,22 +137,136 @@ know better.
 A Postgres enum type becomes a Rust enum beside the struct:
 
 ```rust
-/// The `canopy.tree_issue_status` enum type.
+/// The `shop.product_status` enum type.
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[sqlx(type_name = "tree_issue_status", rename_all = "snake_case")]
+#[sqlx(type_name = "product_status", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
-pub enum TreeIssueStatus {
-    Open,
-    Resolved,
-    Cancelled,
-    Superseded,
+pub enum ProductStatus {
+    Draft,
+    Active,
+    Retired,
 }
 ```
 
 Labels that do not round-trip through `snake_case` get an explicit
 `#[sqlx(rename = "...")]` per variant instead.
 
-### Type mapping
+`--input` adds the insert type:
+
+```rust
+/// Insert input for `shop.product`. Columns the database fills in on its
+/// own are absent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewProduct {
+    pub slug: String,
+    pub name: String,
+    /// `None` leaves this to the column default, `'draft'::shop.product_status`.
+    pub status: Option<ProductStatus>,
+    pub price: Option<Decimal>,
+}
+```
+
+Columns the database owns — generated, identity, or defaulted to a
+function call like `gen_random_uuid()` or `now()` — are left out; an
+insert never supplies them. A column with a *literal* default is
+`Option`, and `None` means "use the default". That distinction is the one
+piece of judgement proto makes about your schema, and it is what keeps
+the generated SQL static.
+
+## Mappers
+
+One repository struct per table, holding a pool and owning every
+statement that touches it:
+
+```rust
+let products = ProductMapper::new(&pool);
+
+let created = products.create(&NewProduct { .. }).await?;
+let one     = products.find_by_id(id).await?;          // primary key
+let by_slug = products.find_by_slug("dovetail").await?; // unique
+let in_org  = products.find_by_org_id(org).await?;      // foreign key
+let all     = products.list().await?;
+let saved   = products.update(&row).await?;
+products.delete(id).await?;
+```
+
+Finders come from the catalog: the primary key and every unique
+constraint yield an `Option`, every single-column foreign key yields a
+`Vec`. Read-only relations get finders and `list` but no writers, and a
+table with no primary key gets no `find_by_id`, `update`, or `delete` —
+there is nothing to address a row by.
+
+`update` is a full replace, not a patch: it writes every column the
+database does not own, addressed by the key. That matches what the
+functions can express, so both strategies behave identically.
+
+### Where the SQL lives
+
+`--sql embedded` (the default) puts the statements in the Rust:
+
+```rust
+pub async fn create(&self, new: &NewProduct) -> Result<Product, sqlx::Error> {
+    sqlx::query_as(
+        "INSERT INTO shop.product
+             (slug, name, status, price)
+         VALUES ($1, $2, COALESCE($3, 'draft'::shop.product_status), $4)
+         RETURNING *",
+    )
+    .bind(&new.slug)
+    ...
+}
+```
+
+`--sql server` puts them in Postgres and calls them:
+
+```rust
+sqlx::query_as("SELECT * FROM shop.product_insert($1, $2, $3, $4)")
+```
+
+with a migration to match, written into `--migrations-dir`:
+
+```sql
+CREATE OR REPLACE FUNCTION shop.product_insert(
+    p_slug text,
+    p_name text,
+    p_status shop.product_status,
+    p_price numeric(10,2)
+)
+RETURNS shop.product
+LANGUAGE sql
+AS $$
+    INSERT INTO shop.product
+        (slug, name, status, price)
+    VALUES
+        (p_slug, p_name, COALESCE(p_status, 'draft'::shop.product_status), p_price)
+    RETURNING *;
+$$;
+```
+
+Functions are named `<table>_<operation>` in the table's own schema:
+`product_insert`, `product_get`, `product_by_slug`, `product_by_org_id`,
+`product_list`, `product_update`, `product_delete`. Readers are `STABLE`;
+writers are left `VOLATILE`. Readers return `SETOF`, so a miss is no rows
+rather than a row of nulls.
+
+Both strategies generate the same Rust API — same methods, same
+signatures. Switching is a regeneration, not a rewrite of the callers.
+
+Every function argument is required. Postgres only allows `DEFAULT` on
+trailing parameters, and a defaulted column can sit anywhere in a table,
+so giving some parameters defaults would mean reordering them away from
+the column order. The mapper passes all of them regardless; add `DEFAULT`
+clauses by hand if you want to call these from `psql` with fewer.
+
+Migration files are named `YYYYMMDDNNN_<schema>_<table>_crud.sql`, taking
+the next free sequence for the day. Regenerating an unchanged table
+leaves its migration alone rather than writing a second one that says the
+same thing — migrations are append-only, and a checksummed one that has
+already been applied must not be edited. Each file opens by dropping
+exactly the functions it defines, by name and whatever signature, so a
+regenerated set replaces the old one instead of overloading it.
+
+## Type mapping
 
 | Postgres | Rust |
 |---|---|
@@ -164,8 +287,8 @@ Labels that do not round-trip through `snake_case` get an explicit
 | a domain | its base type |
 | an enum type | a generated Rust enum |
 
-Anything else lands as `String` with a `// TODO:` above it and a warning on
-stderr. Fix it once in the config:
+Anything else lands as `String` with a `// TODO:` above it and a warning
+on stderr. Fix it once in the config:
 
 ```toml
 [generate.types]
@@ -175,7 +298,12 @@ geometry = "geo_types::Geometry<f64>"
 `[generate.types]` overrides the built-ins too, so a project that wants
 `bigdecimal::BigDecimal` for `numeric` says so there.
 
-### pyo3
+Introspection runs with an empty `search_path`, so every type in the
+generated SQL is written out with its schema. A cast like
+`'draft'::shop.product_status` does not depend on the `search_path` of
+whoever runs it later.
+
+## pyo3
 
 `--pyo3` gates every Python attribute behind a Cargo feature, so the same
 file compiles in a pure-Rust crate and in a Python extension crate:
@@ -183,14 +311,17 @@ file compiles in a pure-Rust crate and in a Python extension crate:
 ```rust
 #[derive(sqlx::FromRow, Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "python", pyo3::pyclass(get_all, set_all))]
-pub struct Species { ... }
+pub struct Product { ... }
 ```
 
-Getters and setters come from `get_all, set_all` on the class rather than a
-`#[pyo3(get, set)]` on each field. That is deliberate: `pyclass` expands
-before `cfg_attr` does, so a field-level `cfg_attr` leaves an orphaned
-`pyo3` attribute and the crate will not compile. Enums get
-`pyclass(eq, eq_int)`.
+Getters and setters come from `get_all, set_all` on the class rather than
+a `#[pyo3(get, set)]` on each field. That is deliberate: `pyclass`
+expands before `cfg_attr` does, so a field-level `cfg_attr` leaves an
+orphaned `pyo3` attribute and the crate will not compile. Enums get
+`pyclass(eq, eq_int)`. Input types get no pyo3 attributes at all — a
+`#[pyclass]` without a `#[new]` constructor cannot be built from Python,
+and writing that constructor is a judgement call about which columns are
+required.
 
 The consuming crate declares the feature and the pyo3 conversions its
 column types need:
@@ -206,6 +337,25 @@ pyo3 = { version = "0.26", optional = true }
 Declare the feature even when it is off — otherwise every generated file
 draws an `unexpected cfg condition` warning. Rename it with
 `pyo3_feature` in the config.
+
+## Development
+
+`just` lists the recipes. `just check` is the fast gate — formatting,
+lints, tests, and rustdoc with warnings promoted to errors. None of it
+needs a database.
+
+`just smoke` does need one. It creates a scratch schema covering the
+cases that decide output, generates models, mappers and functions from
+it, compiles the result as its own crate, applies the functions and
+exercises them, then rolls back and drops the schema. Point it at a
+target with `PROTO_SMOKE_DB`, or run `./scripts/smoke.sh <target>`.
+
+CI runs the same gates: formatting, lints, tests on stable and beta,
+rustdoc with warnings as errors, a build on the MSRV floor, and the
+round trip against a real server — PostgreSQL 16 and 17, each as a
+service container. The config it uses is `.github/proto.ci.toml`, which
+carries no password: `password_env` points at the variable the workflow
+sets for both `proto` and `psql`.
 
 ## License
 

@@ -1,0 +1,150 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Read-only: nothing here needs to write to the repository.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    name: Tests (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, beta]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - uses: Swatinem/rust-cache@v2
+      # The renderers run off a fixture, so the unit tests need no
+      # database. The one that does is the smoke job below.
+      - run: cargo test --all-targets
+      - run: cargo test --doc
+
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # A broken intra-doc link is only a warning by default, so docs.rs
+      # renders it and nobody notices.
+      - run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Keep in step with rust-version in Cargo.toml and MSRV in the
+      # justfile. It is a promise to consumers, so it is a gate.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build
+
+  smoke:
+    name: Round trip (PostgreSQL ${{ matrix.postgres }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest release proto's catalog queries are written against,
+        # and the newest it is developed on.
+        postgres: ["16", "17"]
+
+    # No Dockerfile here: the official image needs nothing baked into it,
+    # no plugin enabled and no config replaced, so a plain service is the
+    # whole setup. The health check is the readiness wait.
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: proto_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d proto_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      PROTO_CONFIG: .github/proto.ci.toml
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      # The script builds a second crate from the generated code. Sharing
+      # one target directory with the first puts both under the cache.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install psql and Python headers
+        # psql applies the generated functions and exercises them.
+        # python3-dev is for pyo3: the generated crate is checked with the
+        # python feature on, and pyo3's build script has to find libpython.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            postgresql-client python3-dev
+          psql --version
+
+      - name: Confirm the server is the version under test
+        run: |
+          version=$(psql -d proto_ci -tAc 'SHOW server_version')
+          echo "server_version: $version"
+          case "$version" in
+            ${{ matrix.postgres }}.*|${{ matrix.postgres }}) ;;
+            *) echo "expected PostgreSQL ${{ matrix.postgres }}" >&2; exit 1 ;;
+          esac
+
+      # Generates a scratch schema, emits models, mappers and functions
+      # from it, compiles the result as its own crate with and without the
+      # python feature, applies the functions, exercises them, and checks
+      # that a rerun writes no duplicate migration.
+      - name: Round trip against the server
+        run: ./scripts/smoke.sh ci
+
+      - name: Server logs
+        if: failure()
+        run: docker logs "$(docker ps -aqf ancestor=postgres:${{ matrix.postgres }})" || true

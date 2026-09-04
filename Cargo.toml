@@ -2,9 +2,12 @@
 name = "iridium-proto"
 version = "0.1.0"
 edition = "2024"
+# Let chains, which the resolution code leans on, stabilized in 1.88.
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 authors = ["Brad Siegfreid <brad@iridiumdesign.com>"]
 description = "Generate Rust models and mappers from a live PostgreSQL schema"
+documentation = "https://docs.rs/iridium-proto"
 keywords = ["postgres", "codegen", "sqlx", "cli", "pyo3"]
 categories = ["command-line-utilities", "database"]
 repository = "https://github.com/iridiumdesign/iridium-proto"

@@ -1,7 +1,11 @@
-use std::path::PathBuf;
+//! `proto` — generate Rust models and mappers from a live PostgreSQL
+//! schema. See the crate documentation for what the generated code looks
+//! like; this file is the command-line surface over it.
+
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
@@ -9,18 +13,18 @@ use iridium_proto::config::{self, Config, Generate, Target};
 use iridium_proto::error::{Error, Result};
 use iridium_proto::introspect::{self, Model};
 use iridium_proto::naming;
-use iridium_proto::output;
-use iridium_proto::render::{self, Opts};
+use iridium_proto::output::{self, Migration};
+use iridium_proto::render::{self, Opts, Rendered, Strategy};
 
 #[derive(Parser)]
 #[command(
     name = "proto",
     version,
-    about = "Generate Rust models from a live PostgreSQL schema",
-    long_about = "Generate Rust models from a live PostgreSQL schema.\n\n\
+    about = "Generate Rust models and mappers from a live PostgreSQL schema",
+    long_about = "Generate Rust models and mappers from a live PostgreSQL schema.\n\n\
                   Output goes to stdout unless a destination is given, so a \
                   model can be filtered straight into a buffer:\n\n    \
-                  :%!proto model arboreal.species --pyo3"
+                  :%!proto model shop.product --pyo3"
 )]
 struct Cli {
     /// Database target from the config file
@@ -35,8 +39,43 @@ struct Cli {
     #[arg(long, global = true, value_name = "URL")]
     url: Option<String>,
 
+    /// Where a mapper's SQL lives: in the Rust source, or in Postgres
+    /// functions a migration defines
+    #[arg(long, global = true, value_name = "WHERE", default_value = "embedded")]
+    sql: SqlStrategy,
+
+    /// Module the mappers import the model types from
+    #[arg(
+        long,
+        global = true,
+        value_name = "PATH",
+        default_value = "crate::model"
+    )]
+    model_path: String,
+
+    /// Directory for the migrations `--sql server` generates
+    #[arg(long, global = true, value_name = "DIR")]
+    migrations_dir: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SqlStrategy {
+    /// Statements live in the generated Rust
+    Embedded,
+    /// Statements live in Postgres functions the mapper calls
+    Server,
+}
+
+impl From<SqlStrategy> for Strategy {
+    fn from(value: SqlStrategy) -> Self {
+        match value {
+            SqlStrategy::Embedded => Strategy::Embedded,
+            SqlStrategy::Server => Strategy::Server,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -49,6 +88,28 @@ enum Command {
         /// Emit feature-gated pyo3 attributes
         #[arg(long)]
         pyo3: bool,
+
+        /// Also emit the `New…` insert input type
+        #[arg(long)]
+        input: bool,
+
+        /// Write to this file instead of stdout
+        #[arg(long, short = 'o', value_name = "FILE")]
+        out: Option<PathBuf>,
+
+        /// Struct name, overriding the one derived from the table name
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+
+        /// Overwrite a destination proto did not generate
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Generate one mapper: proto mapper myschema.mytable
+    Mapper {
+        /// Table as `schema.table`, or `table` to use the default schema
+        table: String,
 
         /// Write to this file instead of stdout
         #[arg(long, short = 'o', value_name = "FILE")]
@@ -72,9 +133,17 @@ enum Command {
         #[arg(long)]
         pyo3: bool,
 
-        /// Write one file per table into this directory instead of stdout
+        /// Also generate mappers; requires --out-dir and --mapper-dir
+        #[arg(long)]
+        mappers: bool,
+
+        /// Write one model file per table into this directory
         #[arg(long, value_name = "DIR")]
         out_dir: Option<PathBuf>,
+
+        /// Write one mapper file per table into this directory
+        #[arg(long, value_name = "DIR")]
+        mapper_dir: Option<PathBuf>,
 
         /// Skip the generated mod.rs
         #[arg(long)]
@@ -91,9 +160,17 @@ enum Command {
         #[arg(long)]
         pyo3: bool,
 
-        /// Root directory for the generated tree
+        /// Also generate mappers; requires --mapper-dir
+        #[arg(long)]
+        mappers: bool,
+
+        /// Root directory for the generated models
         #[arg(long, value_name = "DIR")]
         out_dir: PathBuf,
+
+        /// Root directory for the generated mappers
+        #[arg(long, value_name = "DIR")]
+        mapper_dir: Option<PathBuf>,
 
         /// Skip the generated mod.rs files
         #[arg(long)]
@@ -141,58 +218,84 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Model {
             table,
             pyo3,
+            input,
             out,
             name,
             force,
         } => {
-            let (schema, table_name) = split_ref(table, default_schema(&target, &generate))?;
-            let model = introspect::model(&pool, &schema, &table_name).await?;
-            let opts = Opts {
-                generate: &generate,
-                pyo3: *pyo3,
-                target: &target.label,
-                name_override: name.clone(),
-                command: command_line(&cli),
-            };
-            let rendered = render::model_file(&model, &opts, None);
-            emit(rendered, out.as_deref(), *force)
+            let (schema, relation) = split_ref(table, default_schema(&target, &generate))?;
+            let model = introspect::model(&pool, &schema, &relation).await?;
+            let opts = options(&cli, &generate, &target, *pyo3, *input, name.clone());
+            emit(
+                render::model::model_file(&model, &opts, None),
+                out.as_deref(),
+                *force,
+            )
+        }
+
+        Command::Mapper {
+            table,
+            out,
+            name,
+            force,
+        } => {
+            let (schema, relation) = split_ref(table, default_schema(&target, &generate))?;
+            let model = introspect::model(&pool, &schema, &relation).await?;
+            let opts = options(&cli, &generate, &target, false, true, name.clone());
+            if opts.strategy == Strategy::Server {
+                let dir = migrations_dir(&cli)?;
+                report(output::write_migration(
+                    dir,
+                    &migration_slug(&model),
+                    &render::sql::migration_file(&model, &opts),
+                )?);
+            }
+            emit(
+                render::mapper::mapper_file(&model, &opts),
+                out.as_deref(),
+                *force,
+            )
         }
 
         Command::Schema {
             schema,
             pyo3,
+            mappers,
             out_dir,
+            mapper_dir,
             no_mod,
             force,
         } => {
             let models = read_schema(&pool, schema, &generate).await?;
-            let opts = Opts {
-                generate: &generate,
-                pyo3: *pyo3,
-                target: &target.label,
-                name_override: None,
-                command: command_line(&cli),
-            };
+            let opts = options(&cli, &generate, &target, *pyo3, *mappers, None);
             match out_dir {
-                None => emit(render::schema_file(&models, schema, &opts), None, *force),
-                Some(dir) => write_schema(&models, schema, &opts, dir, *no_mod, *force),
+                Some(dir) => {
+                    let mappers = mapper_target(&cli, *mappers, mapper_dir.as_deref())?;
+                    write_schema(&models, schema, &opts, dir, mappers, *no_mod, *force)
+                }
+                None if *mappers => Err(Error::Usage(
+                    "--mappers needs --out-dir and --mapper-dir".to_string(),
+                )),
+                None => emit(
+                    render::model::schema_file(&models, schema, &opts),
+                    None,
+                    *force,
+                ),
             }
         }
 
         Command::Database {
             pyo3,
+            mappers,
             out_dir,
+            mapper_dir,
             no_mod,
             force,
         } => {
-            let opts = Opts {
-                generate: &generate,
-                pyo3: *pyo3,
-                target: &target.label,
-                name_override: None,
-                command: command_line(&cli),
-            };
+            let opts = options(&cli, &generate, &target, *pyo3, *mappers, None);
+            let mappers = mapper_target(&cli, *mappers, mapper_dir.as_deref())?;
             let mut written = Vec::new();
+
             for schema in introspect::schemas(&pool).await? {
                 if generate.exclude_schemas.iter().any(|s| s == &schema) {
                     continue;
@@ -201,14 +304,33 @@ async fn run(cli: Cli) -> Result<()> {
                 if models.is_empty() {
                     continue;
                 }
-                let dir = out_dir.join(naming::ident(&schema));
-                write_schema(&models, &schema, &opts, &dir, *no_mod, *force)?;
-                written.push(schema);
+                let module = naming::ident(&schema);
+                // proto chose these directory names, so it also knows the
+                // module path the mappers must import their models from.
+                let mut opts = opts.clone();
+                opts.model_path = format!("{}::{module}", cli.model_path);
+                // Models and mappers split by schema; migrations all land
+                // in the one directory, numbered in sequence.
+                let per_schema = mappers.map(|(dir, migrations)| (dir.join(&module), migrations));
+                write_schema(
+                    &models,
+                    &schema,
+                    &opts,
+                    &out_dir.join(&module),
+                    per_schema.as_ref().map(|(d, m)| (d.as_path(), *m)),
+                    *no_mod,
+                    *force,
+                )?;
+                written.push(module);
             }
+
             if !*no_mod && !written.is_empty() {
-                let modules: Vec<String> = written.iter().map(|s| naming::ident(s)).collect();
-                let code = render::mod_file(&modules, "database", &opts);
+                let code = render::model::mod_file(&written, "database", &opts);
                 output::write_file(&out_dir.join("mod.rs"), &code, *force)?;
+                if let Some((dir, _)) = mappers {
+                    let code = render::model::mod_file(&written, "database", &opts);
+                    output::write_file(&dir.join("mod.rs"), &code, *force)?;
+                }
             }
             eprintln!("wrote {} schemas to {}", written.len(), out_dir.display());
             Ok(())
@@ -237,8 +359,28 @@ async fn run(cli: Cli) -> Result<()> {
 
 // ── Wiring ──────────────────────────────────────────────────────────────────
 
-fn resolve(cli: &Cli, path: &std::path::Path, file: Option<Config>) -> Result<(Target, Generate)> {
-    // An explicit URL wins, then DATABASE_URL, then the config file.
+fn options<'a>(
+    cli: &'a Cli,
+    generate: &'a Generate,
+    target: &'a Target,
+    pyo3: bool,
+    inputs: bool,
+    name_override: Option<String>,
+) -> Opts<'a> {
+    Opts {
+        generate,
+        pyo3,
+        inputs,
+        model_path: cli.model_path.clone(),
+        strategy: cli.sql.into(),
+        target: &target.label,
+        name_override,
+        command: command_line(cli),
+    }
+}
+
+fn resolve(cli: &Cli, path: &Path, file: Option<Config>) -> Result<(Target, Generate)> {
+    // An explicit URL wins, then the config file, then DATABASE_URL.
     let generate = file
         .as_ref()
         .map(|c| c.generate.clone())
@@ -250,8 +392,6 @@ fn resolve(cli: &Cli, path: &std::path::Path, file: Option<Config>) -> Result<(T
 
     if let Some(config) = &file {
         let requested = cli.db.as_deref();
-        // DATABASE_URL only stands in when no target was asked for and the
-        // file cannot pick one on its own.
         match config.select(requested, path) {
             Ok((name, target)) => return Ok((Target::from_config(name, target)?, generate)),
             Err(e) => {
@@ -277,6 +417,18 @@ fn resolve(cli: &Cli, path: &std::path::Path, file: Option<Config>) -> Result<(T
 async fn connect(target: &Target) -> Result<PgPool> {
     Ok(PgPoolOptions::new()
         .max_connections(2)
+        .after_connect(|conn, _| {
+            Box::pin(async move {
+                // An empty search_path makes format_type and pg_get_expr
+                // spell out every schema, so a generated cast such as
+                // `'draft'::shop.product_status` does not depend on the
+                // search_path of whoever runs it later.
+                sqlx::query("SET search_path TO ''")
+                    .execute(&mut *conn)
+                    .await?;
+                Ok(())
+            })
+        })
         .connect_with(target.options.clone())
         .await?)
 }
@@ -315,29 +467,62 @@ async fn read_schema(pool: &PgPool, schema: &str, generate: &Generate) -> Result
     Ok(models)
 }
 
+/// Where mappers go, and where their migrations go when the statements
+/// live on the server. Both are resolved before anything is written, so a
+/// missing flag fails before it leaves half a tree on disk.
+fn mapper_target<'a>(
+    cli: &'a Cli,
+    mappers: bool,
+    dir: Option<&'a Path>,
+) -> Result<Option<(&'a Path, Option<&'a Path>)>> {
+    if !mappers {
+        return Ok(None);
+    }
+    let Some(dir) = dir else {
+        return Err(Error::Usage("--mappers needs --mapper-dir".to_string()));
+    };
+    let migrations = match Strategy::from(cli.sql) {
+        Strategy::Server => Some(migrations_dir(cli)?),
+        Strategy::Embedded => None,
+    };
+    Ok(Some((dir, migrations)))
+}
+
+fn migrations_dir(cli: &Cli) -> Result<&Path> {
+    cli.migrations_dir
+        .as_deref()
+        .ok_or_else(|| Error::Usage("--sql server needs --migrations-dir".to_string()))
+}
+
+fn migration_slug(model: &Model) -> String {
+    format!(
+        "{}_{}_crud",
+        naming::ident(&model.table.schema),
+        naming::ident(&model.table.name)
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn write_schema(
     models: &[Model],
     schema: &str,
     opts: &Opts,
-    dir: &std::path::Path,
+    dir: &Path,
+    mappers: Option<(&Path, Option<&Path>)>,
     no_mod: bool,
     force: bool,
 ) -> Result<()> {
-    let enum_path = if render::uses_enums(models) {
-        Some("super::enums")
-    } else {
-        None
-    };
+    let enum_path = render::uses_enums(models).then_some("super::enums");
 
     let mut modules = Vec::new();
     if enum_path.is_some() {
-        let rendered = render::enums_file(models, schema, opts);
+        let rendered = render::model::enums_file(models, schema, opts);
         output::write_file(&dir.join("enums.rs"), &rendered.code, force)?;
         modules.push("enums".to_string());
     }
 
     for model in models {
-        let rendered = render::model_file(model, opts, enum_path);
+        let rendered = render::model::model_file(model, opts, enum_path);
         for warning in &rendered.warnings {
             output::warn(warning);
         }
@@ -347,15 +532,57 @@ fn write_schema(
     }
 
     if !no_mod {
-        let code = render::mod_file(&modules, schema, opts);
+        let code = render::model::mod_file(&modules, schema, opts);
         output::write_file(&dir.join("mod.rs"), &code, force)?;
     }
-
     eprintln!("wrote {} models to {}", models.len(), dir.display());
+
+    if let Some((mapper_dir, migrations)) = mappers {
+        let mut written = Vec::new();
+        for model in models {
+            let rendered = render::mapper::mapper_file(model, opts);
+            let module = naming::ident(&model.table.name);
+            output::write_file(
+                &mapper_dir.join(format!("{module}.rs")),
+                &rendered.code,
+                force,
+            )?;
+            written.push(module);
+        }
+        if !no_mod {
+            let code = render::model::mod_file(&written, schema, opts);
+            output::write_file(&mapper_dir.join("mod.rs"), &code, force)?;
+        }
+        eprintln!(
+            "wrote {} mappers to {}",
+            written.len(),
+            mapper_dir.display()
+        );
+
+        if let Some(migrations) = migrations {
+            for model in models {
+                report(output::write_migration(
+                    migrations,
+                    &migration_slug(model),
+                    &render::sql::migration_file(model, opts),
+                )?);
+            }
+        }
+    }
+
     Ok(())
 }
 
-fn emit(rendered: render::Rendered, out: Option<&std::path::Path>, force: bool) -> Result<()> {
+fn report(migration: Migration) {
+    match migration {
+        Migration::Written(path) => eprintln!("wrote {}", path.display()),
+        Migration::Unchanged(path) => {
+            eprintln!("unchanged, kept {}", path.display());
+        }
+    }
+}
+
+fn emit(rendered: Rendered, out: Option<&Path>, force: bool) -> Result<()> {
     for warning in &rendered.warnings {
         output::warn(warning);
     }
@@ -375,32 +602,60 @@ fn command_line(cli: &Cli) -> String {
     let mut parts = vec!["proto".to_string()];
     match &cli.command {
         Command::Model {
-            table, pyo3, name, ..
+            table,
+            pyo3,
+            input,
+            name,
+            ..
         } => {
             parts.push("model".into());
             parts.push(table.clone());
             if *pyo3 {
                 parts.push("--pyo3".into());
             }
+            if *input {
+                parts.push("--input".into());
+            }
             if let Some(name) = name {
                 parts.push(format!("--name {name}"));
             }
         }
-        Command::Schema { schema, pyo3, .. } => {
+        Command::Mapper { table, name, .. } => {
+            parts.push("mapper".into());
+            parts.push(table.clone());
+            if let Some(name) = name {
+                parts.push(format!("--name {name}"));
+            }
+        }
+        Command::Schema {
+            schema,
+            pyo3,
+            mappers,
+            ..
+        } => {
             parts.push("schema".into());
             parts.push(schema.clone());
             if *pyo3 {
                 parts.push("--pyo3".into());
             }
+            if *mappers {
+                parts.push("--mappers".into());
+            }
         }
-        Command::Database { pyo3, .. } => {
+        Command::Database { pyo3, mappers, .. } => {
             parts.push("database".into());
             if *pyo3 {
                 parts.push("--pyo3".into());
             }
+            if *mappers {
+                parts.push("--mappers".into());
+            }
         }
         // Neither reads a table, so neither ends up in a header.
         Command::List { .. } | Command::Config => {}
+    }
+    if cli.sql == SqlStrategy::Server {
+        parts.push("--sql server".into());
     }
     if let Some(db) = &cli.db
         && cli.url.is_none()
@@ -410,7 +665,7 @@ fn command_line(cli: &Cli) -> String {
     parts.join(" ")
 }
 
-fn show_config(path: &std::path::Path, file: Option<&Config>) -> Result<()> {
+fn show_config(path: &Path, file: Option<&Config>) -> Result<()> {
     println!("config: {}", path.display());
     match file {
         None => {

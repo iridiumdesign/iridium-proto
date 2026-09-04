@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use crate::introspect::PgType;
 use crate::naming;
 
+/// A Rust type, ready to write into a struct.
 #[derive(Debug, Clone)]
 pub struct Mapped {
     /// The Rust type as written in the struct, using short names.
@@ -154,10 +155,10 @@ mod tests {
     #[test]
     fn enum_columns_use_the_generated_name() {
         let ty = PgType::Enum {
-            schema: "arboreal".into(),
-            name: "tree_status".into(),
+            schema: "shop".into(),
+            name: "product_status".into(),
         };
-        assert_eq!(map(&ty, &no_overrides()).text, "TreeStatus");
+        assert_eq!(map(&ty, &no_overrides()).text, "ProductStatus");
     }
 
     #[test]
