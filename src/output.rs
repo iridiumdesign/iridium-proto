@@ -9,8 +9,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::error::{Error, Result};
 use crate::render::MARKER;
 
-/// Write `contents` to `path`, creating parent directories. An existing file
-/// without the generated marker is left alone unless `force` is set.
+/// Write `contents` to `path`, creating parent directories as needed.
+///
+/// # Errors
+///
+/// [`Error::NotGenerated`] when the destination exists, lacks the
+/// generated marker, and `force` is not set — overwriting it would
+/// discard someone's work. Otherwise [`Error::ReadFile`] or
+/// [`Error::WriteFile`] as the filesystem reports.
 pub fn write_file(path: &Path, contents: &str, force: bool) -> Result<()> {
     if path.exists() && !force && !is_generated(path)? {
         return Err(Error::NotGenerated {
@@ -77,6 +83,11 @@ pub enum Migration {
 /// Write a migration into `dir` as `YYYYMMDDNNN_<slug>.sql`, taking the
 /// next free sequence for today.
 ///
+/// # Errors
+///
+/// As [`write_file`], plus a read failure on the directory being
+/// scanned for the sequence already in use.
+///
 /// An existing migration for the same slug whose body matches is left in
 /// place: regenerating an unchanged table should not produce a second file
 /// that says the same thing.
@@ -91,7 +102,7 @@ pub fn write_migration(dir: &Path, slug: &str, contents: &str) -> Result<Migrati
         }
     }
 
-    let path = dir.join(format!("{}_{slug}.sql", next_version(dir)?));
+    let path = dir.join(format!("{}_{slug}.sql", next_version(dir)));
     write_file(&path, contents, false)?;
     Ok(Migration::Written(path))
 }
@@ -100,10 +111,9 @@ pub fn write_migration(dir: &Path, slug: &str, contents: &str) -> Result<Migrati
 /// the first statement on, leaving out the header with its date and
 /// command line.
 fn body(contents: &str) -> &str {
-    match contents.find("DO $$") {
-        Some(at) => &contents[at..],
-        None => contents,
-    }
+    contents
+        .find("DO $$")
+        .map_or(contents, |at| &contents[at..])
 }
 
 fn newest_for(dir: &Path, slug: &str) -> Result<Option<PathBuf>> {
@@ -134,7 +144,7 @@ fn newest_for(dir: &Path, slug: &str) -> Result<Option<PathBuf>> {
 
 /// `YYYYMMDDNNN`, taking the next sequence after the highest already used
 /// today. Migrations from other days are ignored beyond ordering.
-fn next_version(dir: &Path) -> Result<String> {
+fn next_version(dir: &Path) -> String {
     let today = today();
     let mut highest = 0u32;
 
@@ -156,16 +166,15 @@ fn next_version(dir: &Path) -> Result<String> {
         }
     }
 
-    Ok(format!("{today}{:03}", highest + 1))
+    format!("{today}{:03}", highest + 1)
 }
 
 /// Today as `YYYYMMDD`, in UTC.
 fn today() -> String {
     let days = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() / 86_400)
-        .unwrap_or(0) as i64;
-    let (year, month, day) = civil_from_days(days);
+        .map_or(0, |d| d.as_secs() / 86_400);
+    let (year, month, day) = civil_from_days(i64::try_from(days).unwrap_or(0));
     format!("{year:04}{month:02}{day:02}")
 }
 
@@ -180,8 +189,10 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    // Both land in 1..=31 and 1..=12, so the narrowing cannot lose
+    // anything; `try_from` says that rather than asserting it.
+    let d = u32::try_from(doy - (153 * mp + 2) / 5 + 1).unwrap_or(1);
+    let m = u32::try_from(if mp < 10 { mp + 3 } else { mp - 9 }).unwrap_or(1);
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 

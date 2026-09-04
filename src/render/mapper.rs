@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 
 use super::plan::{self, Kind, Operation};
-use super::{Opts, Rendered, Strategy, escape, header, import_block};
+use super::{Opts, Rendered, Strategy, column_list, escape, header, import_block, indent};
 use crate::introspect::{Column, Model, Table};
 use crate::naming;
 use crate::quoting;
@@ -39,7 +39,10 @@ pub fn mapper_file(model: &Model, opts: &Opts) -> Rendered {
 
     let mut methods = String::new();
     for op in &ops {
-        methods.push_str(&method(table, opts, op, &row, &input, &mut imports));
+        methods.push_str(&indent(
+            &method(table, opts, op, &row, &input, &mut imports),
+            4,
+        ));
     }
 
     let mut code = header(
@@ -48,14 +51,20 @@ pub fn mapper_file(model: &Model, opts: &Opts) -> Rendered {
         &format!("{} mapper", table.kind.label()),
     );
     code.push_str(&import_block(&imports));
+    let (schema, name) = (&table.schema, &table.name);
     code.push_str(&format!(
-        "/// Repository for `{}.{}`. Holds the pool for the duration of a\n\
-         /// unit of work (typically a single route handler).\n\
-         pub struct {row}Mapper<'a> {{\n    pool: &'a PgPool,\n}}\n\n\
-         impl<'a> {row}Mapper<'a> {{\n    \
-         /// Borrow a pool for the lifetime of this mapper.\n    \
-         pub fn new(pool: &'a PgPool) -> Self {{\n        Self {{ pool }}\n    }}\n",
-        table.schema, table.name
+        r#"/// Repository for `{schema}.{name}`. Holds the pool for the duration of a
+/// unit of work (typically a single route handler).
+pub struct {row}Mapper<'a> {{
+    pool: &'a PgPool,
+}}
+
+impl<'a> {row}Mapper<'a> {{
+    /// Borrow a pool for the lifetime of this mapper.
+    pub fn new(pool: &'a PgPool) -> Self {{
+        Self {{ pool }}
+    }}
+"#
     ));
     code.push_str(&methods);
     code.push_str("}\n");
@@ -77,66 +86,100 @@ fn method(
     // The statement goes inside a Rust string literal, and a quoted
     // identifier carries the one character that would end it early.
     let sql = escape(&statement(table, opts, op));
+    let key = plan::joined(&op.columns, "`, `");
+
+    // Templates are written at column zero and indented into the impl
+    // block by the caller, so what is written here looks like what comes
+    // out. The doubled braces are format!'s, not the output's.
     match op.kind {
         Kind::Insert => {
-            let binds = bind_fields(&table.insert_columns(), "new");
+            let binds = bind_fields(&table.insert_columns(), "new", opts);
             format!(
-                "\n    /// Insert a row, leaving the database to fill in what it owns.\n    \
-                 pub async fn create(&self, new: &{input}) -> Result<{row}, sqlx::Error> {{\n        \
-                 sqlx::query_as(\n            \"{sql}\",\n        )\n{binds}        \
-                 .fetch_one(self.pool)\n        .await\n    }}\n"
+                r#"
+/// Insert a row, leaving the database to fill in what it owns.
+pub async fn create(&self, new: &{input}) -> Result<{row}, sqlx::Error> {{
+    sqlx::query_as(
+        "{sql}",
+    )
+{binds}    .fetch_one(self.pool)
+    .await
+}}
+"#
             )
         }
+
         Kind::Update => {
-            let columns = ordered_update_columns(table, opts);
-            let binds = bind_fields(&columns, "row");
+            let binds = bind_fields(&ordered_update_columns(table, opts), "row", opts);
             format!(
-                "\n    /// Write every column back, addressed by `{}`. A full replace,\n    \
-                 /// not a patch: what is in `row` is what the table will hold.\n    \
-                 pub async fn update(&self, row: &{row}) -> Result<{row}, sqlx::Error> {{\n        \
-                 sqlx::query_as(\n            \"{sql}\",\n        )\n{binds}        \
-                 .fetch_one(self.pool)\n        .await\n    }}\n",
-                plan::joined(&op.columns, "`, `")
+                r#"
+/// Write every column back, addressed by `{key}`. A full replace,
+/// not a patch: what is in `row` is what the table will hold.
+pub async fn update(&self, row: &{row}) -> Result<{row}, sqlx::Error> {{
+    sqlx::query_as(
+        "{sql}",
+    )
+{binds}    .fetch_one(self.pool)
+    .await
+}}
+"#
             )
         }
+
         Kind::Delete => {
             let (params, binds) = arguments(&op.columns, opts, imports);
             format!(
-                "\n    /// Delete the row identified by `{}`.\n    \
-                 pub async fn delete(&self{params}) -> Result<(), sqlx::Error> {{\n        \
-                 sqlx::query(\"{sql}\")\n{binds}            \
-                 .execute(self.pool)\n            .await?;\n        Ok(())\n    }}\n",
-                plan::joined(&op.columns, "`, `")
+                r#"
+/// Delete the row identified by `{key}`.
+pub async fn delete(&self{params}) -> Result<(), sqlx::Error> {{
+    sqlx::query("{sql}")
+{binds}        .execute(self.pool)
+        .await?;
+    Ok(())
+}}
+"#
             )
         }
+
         Kind::FindOne => {
             let (params, binds) = arguments(&op.columns, opts, imports);
+            let method = &op.method;
             format!(
-                "\n    /// Look up the row identified by `{}`.\n    \
-                 pub async fn {}(&self{params}) -> Result<Option<{row}>, sqlx::Error> {{\n        \
-                 sqlx::query_as(\"{sql}\")\n{binds}            \
-                 .fetch_optional(self.pool)\n            .await\n    }}\n",
-                plan::joined(&op.columns, "`, `"),
-                op.method
+                r#"
+/// Look up the row identified by `{key}`.
+pub async fn {method}(&self{params}) -> Result<Option<{row}>, sqlx::Error> {{
+    sqlx::query_as("{sql}")
+{binds}        .fetch_optional(self.pool)
+        .await
+}}
+"#
             )
         }
+
         Kind::FindMany => {
             let (params, binds) = arguments(&op.columns, opts, imports);
+            let method = &op.method;
             format!(
-                "\n    /// Every row whose `{}` matches.\n    \
-                 pub async fn {}(&self{params}) -> Result<Vec<{row}>, sqlx::Error> {{\n        \
-                 sqlx::query_as(\"{sql}\")\n{binds}            \
-                 .fetch_all(self.pool)\n            .await\n    }}\n",
-                plan::joined(&op.columns, "`, `"),
-                op.method
+                r#"
+/// Every row whose `{key}` matches.
+pub async fn {method}(&self{params}) -> Result<Vec<{row}>, sqlx::Error> {{
+    sqlx::query_as("{sql}")
+{binds}        .fetch_all(self.pool)
+        .await
+}}
+"#
             )
         }
+
         Kind::List => format!(
-            "\n    /// Every row. Put a bound on this before pointing it at a\n    \
-             /// large table.\n    \
-             pub async fn list(&self) -> Result<Vec<{row}>, sqlx::Error> {{\n        \
-             sqlx::query_as(\"{sql}\")\n            \
-             .fetch_all(self.pool)\n            .await\n    }}\n"
+            r#"
+/// Every row. Put a bound on this before pointing it at a
+/// large table.
+pub async fn list(&self) -> Result<Vec<{row}>, sqlx::Error> {{
+    sqlx::query_as("{sql}")
+        .fetch_all(self.pool)
+        .await
+}}
+"#
         ),
     }
 }
@@ -178,9 +221,12 @@ fn statement(table: &Table, opts: &Opts, op: &Operation) -> String {
                     None => format!("${}", i + 1),
                 })
                 .collect();
+            // The continuation lines are written for the column the
+            // template puts this literal at, so the statement stays
+            // readable in the file that ends up holding it.
             format!(
-                "INSERT INTO {relation}\n                 ({})\n             VALUES ({})\n             RETURNING *",
-                names(&columns, ", "),
+                "INSERT INTO {relation}\n             ({})\n         VALUES ({})\n         RETURNING *",
+                column_list(&columns, ", "),
                 values.join(", ")
             )
         }
@@ -192,7 +238,7 @@ fn statement(table: &Table, opts: &Opts, op: &Operation) -> String {
                 .map(|(i, c)| format!("{} = ${}", quoting::ident(&c.name), i + 1))
                 .collect();
             format!(
-                "UPDATE {relation}\n                SET {}\n              WHERE {}\n          RETURNING *",
+                "UPDATE {relation}\n            SET {}\n          WHERE {}\n      RETURNING *",
                 sets.join(", "),
                 predicate(&op.columns, columns.len() + 1)
             )
@@ -207,7 +253,7 @@ fn statement(table: &Table, opts: &Opts, op: &Operation) -> String {
             if !table.primary_key.is_empty() {
                 sql.push_str(&format!(
                     " ORDER BY {}",
-                    names(&table.primary_key_columns(), ", ")
+                    column_list(&table.primary_key_columns(), ", ")
                 ));
             }
             sql
@@ -228,10 +274,20 @@ fn ordered_update_columns<'t>(table: &'t Table, opts: &Opts) -> Vec<&'t Column> 
 
 // ── Fragments ───────────────────────────────────────────────────────────────
 
-fn bind_fields(columns: &[&Column], binding: &str) -> String {
+fn bind_fields(columns: &[&Column], binding: &str, opts: &Opts) -> String {
     columns
         .iter()
-        .map(|c| format!("        .bind(&{binding}.{})\n", naming::ident(&c.name)))
+        .map(|c| {
+            // A `Copy` type binds by value. Borrowing one compiles, but it
+            // is a clippy warning in whichever crate ends up with this
+            // file, and generated code should not hand anyone a lint.
+            let by_ref = if typemap::map(&c.ty, opts.generate).copy {
+                ""
+            } else {
+                "&"
+            };
+            format!("    .bind({by_ref}{binding}.{})\n", naming::ident(&c.name))
+        })
         .collect()
 }
 
@@ -240,19 +296,20 @@ fn arguments(columns: &[&Column], opts: &Opts, imports: &mut BTreeSet<String>) -
     let mut params = String::new();
     let mut binds = String::new();
     for column in columns {
-        let mapped = typemap::map(&column.ty, &opts.generate.types);
+        let mapped = typemap::map(&column.ty, opts.generate);
         for import in &mapped.imports {
             imports.insert(import.clone());
         }
         let name = naming::ident(&column.name);
-        params.push_str(&format!(", {name}: {}", borrowed(&mapped.text)));
-        binds.push_str(&format!("            .bind({name})\n"));
+        params.push_str(&format!(", {name}: {}", param_type(&mapped.text)));
+        binds.push_str(&format!("        .bind({name})\n"));
     }
     (params, binds)
 }
 
-/// Lookup arguments are borrowed where borrowing is the natural Rust shape.
-fn borrowed(ty: &str) -> String {
+/// The Rust type a lookup argument takes: borrowed where borrowing is the
+/// natural shape for a caller, by value otherwise.
+fn param_type(ty: &str) -> String {
     if ty == "String" {
         return "&str".to_string();
     }
@@ -276,14 +333,6 @@ fn placeholders(count: usize) -> String {
         .map(|n| format!("${n}"))
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-fn names(columns: &[&Column], sep: &str) -> String {
-    columns
-        .iter()
-        .map(|c| quoting::ident(&c.name))
-        .collect::<Vec<_>>()
-        .join(sep)
 }
 
 #[cfg(test)]

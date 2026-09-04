@@ -16,7 +16,7 @@ exclude = ["CLAUDE.md", ".github/"]
 
 [[bin]]
 name = "proto"
-path = "src/main.rs"
+path = "src/bin/proto/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

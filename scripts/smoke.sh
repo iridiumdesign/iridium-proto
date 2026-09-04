@@ -98,7 +98,7 @@ say "generating models, mappers and functions"
     schema "$SCHEMA" --pyo3 --mappers \
     --out-dir "$WORK/src/model" --mapper-dir "$WORK/src/mapper"
 
-say "compiling the generated crate"
+say "compiling the generated crate, and linting it as hard as this one"
 cat > "$WORK/Cargo.toml" <<'TOML'
 [package]
 name = "proto-smoke"
@@ -120,7 +120,15 @@ sqlx = { version = "0.8", features = [
 uuid = { version = "1", features = ["serde"] }
 TOML
 printf 'pub mod mapper;\npub mod model;\n' > "$WORK/src/lib.rs"
-(cd "$WORK" && cargo check --quiet && cargo check --quiet --features python)
+# Generated code is held to the same bar as the code that writes it:
+# whatever proto emits has to survive `-D warnings` in someone else's
+# crate, or it is proto handing them a lint to clean up.
+(
+    cd "$WORK"
+    cargo check --quiet
+    cargo check --quiet --features python
+    cargo clippy --quiet --all-targets -- -D warnings
+)
 
 say "applying the functions and exercising them"
 # psql's \i takes a literal path, so the shell resolves the version

@@ -73,6 +73,31 @@ fn header(opts: &Opts, source: &str, kind: &str) -> String {
     header_with(opts, source, kind, "//")
 }
 
+/// Column names for a SQL clause, quoted where they need it.
+pub(crate) fn column_list(columns: &[&crate::introspect::Column], sep: &str) -> String {
+    columns
+        .iter()
+        .map(|c| crate::quoting::ident(&c.name))
+        .collect::<Vec<_>>()
+        .join(sep)
+}
+
+/// Indent every non-blank line, for nesting a rendered block inside
+/// another. Templates are written at column zero so they look like their
+/// own output; this is what puts them where they belong.
+pub(crate) fn indent(text: &str, by: usize) -> String {
+    let pad = " ".repeat(by);
+    text.lines()
+        .map(|line| {
+            if line.is_empty() {
+                String::from("\n")
+            } else {
+                format!("{pad}{line}\n")
+            }
+        })
+        .collect()
+}
+
 /// The generated header, with the comment marker of the target language.
 fn header_with(opts: &Opts, source: &str, kind: &str, prefix: &str) -> String {
     format!(

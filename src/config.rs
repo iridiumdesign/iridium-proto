@@ -151,7 +151,13 @@ pub fn config_path(explicit: Option<&Path>) -> PathBuf {
 
 impl Config {
     /// Load the config file. A missing file is not an error on its own —
-    /// `--url` and `DATABASE_URL` both work without one.
+    /// `--url` and `DATABASE_URL` both work without one, so absence comes
+    /// back as `Ok(None)`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ReadFile`] if the file exists but cannot be read, and
+    /// [`Error::ParseConfig`] if it is not the TOML this expects.
     pub fn load(path: &Path) -> Result<Option<Self>> {
         let contents = match std::fs::read_to_string(path) {
             Ok(c) => c,
@@ -179,7 +185,15 @@ impl Config {
             .join(", ")
     }
 
-    /// Pick the target named by `--db`, else `default_db`, else the only one.
+    /// Pick the target named by `--db`, else `default_db`, else the only
+    /// one defined.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NoTargets`] when the file defines none,
+    /// [`Error::UnknownTarget`] when the name is not among them, and
+    /// [`Error::AmbiguousTarget`] when there are several and nothing said
+    /// which.
     pub fn select(&self, requested: Option<&str>, path: &Path) -> Result<(&str, &DbTarget)> {
         if self.databases.is_empty() {
             return Err(Error::NoTargets {
@@ -222,7 +236,13 @@ pub struct Target {
 }
 
 impl Target {
-    /// Build from an explicit connection string (`--url` or `DATABASE_URL`).
+    /// Build from an explicit connection string (`--url` or
+    /// `DATABASE_URL`).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Database`] if the string is not a connection URL sqlx
+    /// understands.
     pub fn from_url(url: &str, label: &str) -> Result<Self> {
         let options: PgConnectOptions = url.parse()?;
         Ok(Self {

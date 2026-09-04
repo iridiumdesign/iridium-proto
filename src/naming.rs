@@ -14,6 +14,17 @@ const KEYWORDS: &[&str] = &[
 ];
 
 /// `member_units` -> `MemberUnits`, `tree status` -> `TreeStatus`.
+///
+/// # Examples
+///
+/// ```
+/// use iridium_proto::naming::pascal_case;
+///
+/// assert_eq!(pascal_case("order_items"), "OrderItems");
+/// assert_eq!(pascal_case("product"), "Product");
+/// // A name that cannot start an identifier gets a prefix.
+/// assert_eq!(pascal_case("2fa_token"), "V2faToken");
+/// ```
 pub fn pascal_case(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut upper_next = true;
@@ -39,7 +50,20 @@ pub fn pascal_case(input: &str) -> String {
 }
 
 /// `MemberUnits` -> `member_units`. Used to test whether an enum label
-/// round-trips through `rename_all = "snake_case"`.
+/// round-trips through `rename_all = "snake_case"`, which decides
+/// between a type-level rename and one per variant.
+///
+/// # Examples
+///
+/// ```
+/// use iridium_proto::naming::{pascal_case, snake_case};
+///
+/// assert_eq!(snake_case("NeedsWork"), "needs_work");
+///
+/// // The round trip an enum label has to survive.
+/// let label = "needs_work";
+/// assert_eq!(snake_case(&pascal_case(label)), label);
+/// ```
 pub fn snake_case(input: &str) -> String {
     let mut out = String::with_capacity(input.len() + 4);
     let mut prev_lower_or_digit = false;
@@ -69,6 +93,19 @@ pub fn snake_case(input: &str) -> String {
 /// carries the real column name, so nothing is lost by not matching it
 /// character for character. Keywords come back as raw identifiers
 /// (`r#type`).
+///
+/// # Examples
+///
+/// ```
+/// use iridium_proto::naming::ident;
+///
+/// assert_eq!(ident("common name"), "common_name");
+/// assert_eq!(ident("Mixed Case"), "mixed_case");
+/// assert_eq!(ident("type"), "r#type");
+///
+/// // Output paths are built from these, so nothing can traverse.
+/// assert_eq!(ident("../../etc/passwd"), "_etc_passwd");
+/// ```
 pub fn ident(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for c in input.chars() {

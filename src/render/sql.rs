@@ -12,7 +12,7 @@
 //! the column order. The generated mapper passes all of them regardless.
 
 use super::plan::{self, Kind};
-use super::{Opts, header_with};
+use super::{Opts, column_list, header_with};
 use crate::introspect::{Column, Model, Table};
 use crate::quoting;
 
@@ -37,25 +37,26 @@ pub fn migration_file(model: &Model, opts: &Opts) -> String {
         .map(|op| quoting::literal(&plan::function_name(table, &op.call)))
         .collect();
 
+    let schema = quoting::literal(&table.schema);
+    let names = names.join(", ");
     sql.push_str(&format!(
-        "-- Replace any earlier definition of these functions, whatever the\n\
-         -- signature, so a regenerated set does not overload the old one.\n\
-         DO $$\n\
-         DECLARE\n    \
-             fn record;\n\
-         BEGIN\n    \
-             FOR fn IN\n        \
-                 SELECT p.oid::regprocedure AS signature\n          \
-                   FROM pg_proc p\n          \
-                   JOIN pg_namespace n ON n.oid = p.pronamespace\n         \
-                  WHERE n.nspname = {}\n           \
-                    AND p.proname IN ({})\n    \
-             LOOP\n        \
-                 EXECUTE format('DROP FUNCTION IF EXISTS %s', fn.signature);\n    \
-             END LOOP;\n\
-         END $$;\n",
-        quoting::literal(&table.schema),
-        names.join(", ")
+        r#"-- Replace any earlier definition of these functions, whatever the
+-- signature, so a regenerated set does not overload the old one.
+DO $$
+DECLARE
+    fn record;
+BEGIN
+    FOR fn IN
+        SELECT p.oid::regprocedure AS signature
+          FROM pg_proc p
+          JOIN pg_namespace n ON n.oid = p.pronamespace
+         WHERE n.nspname = {schema}
+           AND p.proname IN ({names})
+    LOOP
+        EXECUTE format('DROP FUNCTION IF EXISTS %s', fn.signature);
+    END LOOP;
+END $$;
+"#
     ));
 
     for op in &ops {
@@ -88,7 +89,7 @@ fn function(table: &Table, op: &plan::Operation) -> String {
                 "",
                 format!(
                     "    INSERT INTO {relation}\n        ({})\n    VALUES\n        ({})\n    RETURNING *;",
-                    names(&columns, ", "),
+                    column_list(&columns, ", "),
                     values.join(", ")
                 ),
             )
@@ -134,7 +135,7 @@ fn function(table: &Table, op: &plan::Operation) -> String {
             if !table.primary_key.is_empty() {
                 body.push_str(&format!(
                     "\n     ORDER BY {}",
-                    names(&table.primary_key_columns(), ", ")
+                    column_list(&table.primary_key_columns(), ", ")
                 ));
             }
             body.push(';');
@@ -143,8 +144,13 @@ fn function(table: &Table, op: &plan::Operation) -> String {
     };
 
     format!(
-        "CREATE OR REPLACE FUNCTION {name}({params})\nRETURNS {returns}\n\
-         LANGUAGE sql{volatility}\nAS $$\n{body}\n$$;\n"
+        r#"CREATE OR REPLACE FUNCTION {name}({params})
+RETURNS {returns}
+LANGUAGE sql{volatility}
+AS $$
+{body}
+$$;
+"#
     )
 }
 
@@ -172,14 +178,6 @@ fn predicate(columns: &[&Column]) -> String {
         .map(|c| format!("{} = {}", quoting::ident(&c.name), param(c)))
         .collect::<Vec<_>>()
         .join("\n       AND ")
-}
-
-fn names(columns: &[&Column], sep: &str) -> String {
-    columns
-        .iter()
-        .map(|c| quoting::ident(&c.name))
-        .collect::<Vec<_>>()
-        .join(sep)
 }
 
 #[cfg(test)]

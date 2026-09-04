@@ -36,7 +36,7 @@ impl RelKind {
     }
 
     /// The name to use in prose, e.g. `materialized view`.
-    pub fn label(&self) -> &'static str {
+    pub const fn label(&self) -> &'static str {
         match self {
             Self::Table => "table",
             Self::Partitioned => "partitioned table",
@@ -49,7 +49,7 @@ impl RelKind {
     /// Whether `NOT NULL` means anything here. A view reports every
     /// column as nullable no matter what feeds it, which is worth saying
     /// in the generated header.
-    pub fn nullability_is_known(&self) -> bool {
+    pub const fn nullability_is_known(&self) -> bool {
         matches!(self, Self::Table | Self::Partitioned | Self::Foreign)
     }
 }
@@ -154,7 +154,7 @@ pub struct ForeignKey {
 impl Table {
     /// Rows can be written back. Views and materialized views cannot,
     /// without rules or triggers proto cannot see.
-    pub fn writable(&self) -> bool {
+    pub const fn writable(&self) -> bool {
         matches!(
             self.kind,
             RelKind::Table | RelKind::Partitioned | RelKind::Foreign

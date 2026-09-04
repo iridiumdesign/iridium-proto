@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use super::Rendered;
 use super::{
-    Opts, dedupe_enums, derive_line, doc_comment, escape, has_serde, header, import_block,
+    Opts, dedupe_enums, derive_line, doc_comment, escape, has_serde, header, import_block, indent,
 };
 use crate::introspect::{Column, Model, PgEnum, Table};
 use crate::naming;
@@ -116,6 +116,73 @@ pub fn mod_file(modules: &[String], source: &str, opts: &Opts) -> String {
 
 // ── Blocks ──────────────────────────────────────────────────────────────────
 
+/// The doc comment above a struct: the table's own comment, its key, and
+/// a warning where `NOT NULL` means nothing.
+fn struct_docs(table: &Table) -> String {
+    let mut docs = String::new();
+    if let Some(comment) = &table.comment {
+        docs.push_str(&doc_comment(comment, ""));
+    }
+    if !table.primary_key.is_empty() {
+        let key = table.primary_key.join("`, `");
+        docs.push_str(&format!("/// Primary key: `{key}`.\n"));
+    }
+    if !table.kind.nullability_is_known() {
+        if !docs.is_empty() {
+            docs.push_str("///\n");
+        }
+        let kind = table.kind.label();
+        docs.push_str(&format!(
+            "/// Every column of a {kind} reports as nullable, so every field\n\
+             /// here is `Option`. Tighten by hand where you know better.\n"
+        ));
+    }
+    docs
+}
+
+/// One field: its doc comment, an optional note after it, whatever
+/// rename it needs to keep matching the column, and the declaration.
+/// Written at column zero.
+///
+/// The renames follow the derives. A row struct derives `sqlx::FromRow`
+/// and needs the sqlx rename; an input type does not, and does not.
+fn field(column: &Column, ty: &str, derives: &[String], note: Option<&str>) -> String {
+    let mut out = String::new();
+    if let Some(comment) = &column.comment {
+        out.push_str(&doc_comment(comment, ""));
+    }
+    // Anything the caller wants said after the column's own comment.
+    if let Some(note) = note {
+        out.push_str(note);
+    }
+
+    let name = naming::ident(&column.name);
+    if name.trim_start_matches("r#") != column.name {
+        let renamed = escape(&column.name);
+        if derives.iter().any(|d| d == "sqlx::FromRow") {
+            out.push_str(&format!("#[sqlx(rename = \"{renamed}\")]\n"));
+        }
+        if has_serde(derives) {
+            out.push_str(&format!("#[serde(rename = \"{renamed}\")]\n"));
+        }
+    }
+    out.push_str(&format!("pub {name}: {ty},\n"));
+    out
+}
+
+/// The pyo3 attribute for a generated struct, if it was asked for.
+///
+/// `get_all, set_all` rather than a `#[pyo3(get, set)]` on every field:
+/// pyclass never sees a field-level `cfg_attr`, which is expanded after
+/// the macro runs, so per-field gating does not compile.
+fn pyclass(opts: &Opts) -> String {
+    if !opts.pyo3 {
+        return String::new();
+    }
+    let feature = &opts.generate.pyo3_feature;
+    format!("#[cfg_attr(feature = \"{feature}\", pyo3::pyclass(get_all, set_all))]\n")
+}
+
 fn struct_block(
     table: &Table,
     opts: &Opts,
@@ -126,61 +193,26 @@ fn struct_block(
         .name_override
         .clone()
         .unwrap_or_else(|| naming::pascal_case(&table.name));
-    let mut out = String::new();
+    let docs = struct_docs(table);
+    let derives = derive_line(&opts.generate.derives, imports);
+    let pyclass = pyclass(opts);
 
-    if let Some(comment) = &table.comment {
-        out.push_str(&doc_comment(comment, ""));
-    }
-    if !table.primary_key.is_empty() {
-        out.push_str(&format!(
-            "/// Primary key: `{}`.\n",
-            table.primary_key.join("`, `")
-        ));
-    }
-    if !table.kind.nullability_is_known() {
-        if !out.is_empty() {
-            out.push_str("///\n");
-        }
-        out.push_str(&format!(
-            "/// Every column of a {} reports as nullable, so every field\n\
-             /// here is `Option`. Tighten by hand where you know better.\n",
-            table.kind.label()
-        ));
-    }
-
-    out.push_str(&derive_line(&opts.generate.derives, imports));
-    if opts.pyo3 {
-        // `get_all, set_all` rather than a `#[pyo3(get, set)]` on every
-        // field: pyclass never sees a field-level `cfg_attr` (it is expanded
-        // after the macro runs), so per-field gating does not compile.
-        out.push_str(&format!(
-            "#[cfg_attr(feature = \"{}\", pyo3::pyclass(get_all, set_all))]\n",
-            opts.generate.pyo3_feature
-        ));
-    }
-    out.push_str(&format!("pub struct {name} {{\n"));
-
-    let serde = has_serde(&opts.generate.derives);
-    let mut fields: BTreeSet<String> = BTreeSet::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut fields = String::new();
     for column in &table.columns {
-        if !fields.insert(naming::ident(&column.name)) {
+        let ident = naming::ident(&column.name);
+        if !seen.insert(ident.clone()) {
             warnings.push(format!(
-                "{}.{}: columns `{}` and another reduce to the same field \
-                 name `{}`; rename one or the generated struct will not \
-                 compile",
-                table.schema,
-                table.name,
-                column.name,
-                naming::ident(&column.name)
+                "{}.{}: two columns reduce to the field name `{ident}`; \
+                 rename one or the generated struct will not compile",
+                table.schema, table.name
             ));
         }
-        let mapped = typemap::map(&column.ty, &opts.generate.types);
-        for import in &mapped.imports {
-            imports.insert(import.clone());
-        }
 
+        let mapped = typemap::map(&column.ty, opts.generate);
+        imports.extend(mapped.imports.iter().cloned());
         if let Some(unknown) = &mapped.unmapped {
-            out.push_str(&format!(
+            fields.push_str(&format!(
                 "    // TODO: unmapped Postgres type `{unknown}` — set \
                  [generate.types] {unknown} = \"...\"\n"
             ));
@@ -189,33 +221,19 @@ fn struct_block(
                 table.schema, table.name, column.name
             ));
         }
-        if let Some(comment) = &column.comment {
-            out.push_str(&doc_comment(comment, "    "));
-        }
 
-        let field = naming::ident(&column.name);
-        if field.trim_start_matches("r#") != column.name {
-            out.push_str(&format!(
-                "    #[sqlx(rename = \"{}\")]\n",
-                escape(&column.name)
-            ));
-            if serde {
-                out.push_str(&format!(
-                    "    #[serde(rename = \"{}\")]\n",
-                    escape(&column.name)
-                ));
-            }
-        }
         let ty = if column.not_null {
             mapped.text
         } else {
             format!("Option<{}>", mapped.text)
         };
-        out.push_str(&format!("    pub {field}: {ty},\n"));
+        fields.push_str(&indent(
+            &field(column, &ty, &opts.generate.derives, None),
+            4,
+        ));
     }
 
-    out.push_str("}\n");
-    out
+    format!("{docs}{derives}{pyclass}pub struct {name} {{\n{fields}}}\n")
 }
 
 fn enum_block(e: &PgEnum, opts: &Opts, imports: &mut BTreeSet<String>) -> String {
@@ -280,50 +298,35 @@ fn input_block(table: &Table, opts: &Opts, imports: &mut BTreeSet<String>) -> St
         return String::new();
     }
 
-    let name = format!(
-        "New{}",
-        opts.name_override
-            .clone()
-            .unwrap_or_else(|| naming::pascal_case(&table.name))
-    );
-    let mut out = format!(
-        "\n/// Insert input for `{}.{}`. Columns the database fills in on its\n\
-         /// own are absent.\n",
-        table.schema, table.name
-    );
-    out.push_str(&derive_line(&opts.generate.input_derives, imports));
-    out.push_str(&format!("pub struct {name} {{\n"));
+    let name = opts
+        .name_override
+        .clone()
+        .unwrap_or_else(|| naming::pascal_case(&table.name));
+    let derives = derive_line(&opts.generate.input_derives, imports);
 
-    let serde = has_serde(&opts.generate.input_derives);
+    let mut fields = String::new();
     for column in &columns {
-        let mapped = typemap::map(&column.ty, &opts.generate.types);
-        for import in &mapped.imports {
-            imports.insert(import.clone());
-        }
-        if let Some(comment) = &column.comment {
-            out.push_str(&doc_comment(comment, "    "));
-        }
-        if let Some(default) = column.literal_default() {
-            out.push_str(&format!(
-                "    /// `None` leaves this to the column default, `{}`.\n",
-                escape(default)
-            ));
-        }
+        let mapped = typemap::map(&column.ty, opts.generate);
+        imports.extend(mapped.imports.iter().cloned());
 
-        let field = naming::ident(&column.name);
-        if field.trim_start_matches("r#") != column.name && serde {
-            out.push_str(&format!(
-                "    #[serde(rename = \"{}\")]\n",
-                escape(&column.name)
-            ));
-        }
-        out.push_str(&format!(
-            "    pub {field}: {},\n",
-            input_type(column, &mapped.text)
+        let note = column.literal_default().map(|default| {
+            format!(
+                "/// `None` leaves this to the column default, `{}`.\n",
+                escape(default)
+            )
+        });
+        let ty = input_type(column, &mapped.text);
+        fields.push_str(&indent(
+            &field(column, &ty, &opts.generate.input_derives, note.as_deref()),
+            4,
         ));
     }
-    out.push_str("}\n");
-    out
+
+    format!(
+        "\n/// Insert input for `{}.{}`. Columns the database fills in on its\n\
+         /// own are absent.\n{derives}pub struct New{name} {{\n{fields}}}\n",
+        table.schema, table.name
+    )
 }
 
 /// A column with a literal default is optional on insert even when it is
