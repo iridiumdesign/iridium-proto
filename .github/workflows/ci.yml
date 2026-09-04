@@ -148,3 +148,48 @@ jobs:
       - name: Server logs
         if: failure()
         run: docker logs "$(docker ps -aqf ancestor=postgres:${{ matrix.postgres }})" || true
+
+  python:
+    name: Python interop
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: proto_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d proto_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      PROTO_CONFIG: .github/proto.ci.toml
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install psql
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client
+
+      # Builds an extension module out of the generated models and drives
+      # it from the interpreter: reads, writes, nulls, enum comparison,
+      # and that a NOT NULL column still refuses None on the far side.
+      - name: Interop against a real interpreter
+        run: ./scripts/python.sh ci

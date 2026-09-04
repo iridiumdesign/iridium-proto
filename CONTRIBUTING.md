@@ -103,6 +103,10 @@ the catalog queries, run it before you send the patch — the unit tests
 prove proto emits the text it means to, and only this proves the text is
 real.
 
+`just python` is the same argument for the `--pyo3` output: it builds an
+extension module from generated models and drives it from an
+interpreter. Run it if you touch anything pyo3.
+
 ## What a change needs
 
 New behavior comes with a test. The renderers run off a fixture in

@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use super::Rendered;
 use super::{
     Opts, dedupe_enums, derive_line, doc_comment, escape, has_serde, header, import_block, indent,
+    reexport_block,
 };
 use crate::introspect::{Column, Model, PgEnum, Table};
 use crate::naming;
@@ -21,17 +22,24 @@ use crate::typemap;
 /// tables is defined once.
 pub fn model_file(model: &Model, opts: &Opts, enum_path: Option<&str>) -> Rendered {
     let mut imports = BTreeSet::new();
+    let mut reexports = BTreeSet::new();
     let mut warnings = Vec::new();
     let mut body = String::new();
 
-    if enum_path.is_none() {
-        for e in &model.enums {
-            body.push_str(&enum_block(e, opts, &mut imports));
-            body.push('\n');
+    match enum_path {
+        // Defined here, so nothing to bring in.
+        None => {
+            for e in &model.enums {
+                body.push_str(&enum_block(e, opts, &mut imports));
+                body.push('\n');
+            }
         }
-    } else if let Some(path) = enum_path {
-        for e in &model.enums {
-            imports.insert(format!("{path}::{}", naming::pascal_case(&e.name)));
+        // Defined next door, and named in a field of this module's
+        // struct, so it is re-exported for whoever holds one.
+        Some(path) => {
+            for e in &model.enums {
+                reexports.insert(format!("{path}::{}", naming::pascal_case(&e.name)));
+            }
         }
     }
 
@@ -48,6 +56,10 @@ pub fn model_file(model: &Model, opts: &Opts, enum_path: Option<&str>) -> Render
     let source = format!("{}.{}", model.table.schema, model.table.name);
     let mut code = header(opts, &source, model.table.kind.label());
     code.push_str(&import_block(&imports));
+    code.push_str(&reexport_block(&reexports));
+    if !reexports.is_empty() {
+        code.push('\n');
+    }
     code.push_str(&body);
 
     Rendered { code, warnings }
@@ -428,6 +440,26 @@ mod tests {
             "{:?}",
             rendered.warnings
         );
+    }
+
+    /// A type named in a struct field has to be nameable by whoever
+    /// holds that struct. `cargo check` never catches this, because
+    /// nothing inside the generated crate refers to the enum by path —
+    /// building a Python extension from it did.
+    #[test]
+    fn enum_types_from_a_sibling_module_are_reexported() {
+        let generate = Generate::default();
+        let opts = fixture::opts(&generate, Strategy::Embedded);
+        let out = model_file(&fixture::product(), &opts, Some("super::enums")).code;
+        assert!(
+            out.contains("pub use super::enums::ProductStatus;"),
+            "{out}"
+        );
+
+        // Defined in the same file, there is nothing to re-export.
+        let inline = model_file(&fixture::product(), &opts, None).code;
+        assert!(!inline.contains("pub use"), "{inline}");
+        assert!(inline.contains("pub enum ProductStatus {"), "{inline}");
     }
 
     #[test]

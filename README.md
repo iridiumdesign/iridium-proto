@@ -447,6 +447,28 @@ Declare the feature even when it is off — otherwise every generated file
 draws an `unexpected cfg condition` warning. Rename it with
 `pyo3_feature` in the config.
 
+Where a schema run puts enum types in their own module, each model
+re-exports the ones its struct names, so `model::item::ItemStatus`
+resolves for whoever holds an `Item` and nobody has to know where proto
+filed it.
+
+Everything crosses as the native Python type, and keeps the schema's
+guarantees on the far side:
+
+| Column | Python |
+|---|---|
+| `uuid` | `uuid.UUID` |
+| `text` | `str` |
+| `numeric` | `decimal.Decimal` |
+| `timestamptz` | aware `datetime.datetime` |
+| `text[]` | `list[str]` |
+| an enum type | a Python enum, comparable and `int()`-able |
+| a nullable column | the value, or `None` |
+
+Setters are type-checked rather than coercing, and a `NOT NULL` column
+refuses `None`. `just python` proves all of that against a real
+interpreter rather than taking it on trust — see below.
+
 ## Development
 
 `just` lists the recipes. `just check` is the fast gate — formatting,
@@ -459,12 +481,19 @@ it, compiles the result as its own crate, applies the functions and
 exercises them, then rolls back and drops the schema. Point it at a
 target with `PROTO_SMOKE_DB`, or run `./scripts/smoke.sh <target>`.
 
+`just python` needs a database and an interpreter. `cargo check
+--features python` only proves the pyo3 output compiles; this builds a
+real extension module out of generated models, imports it, and reads and
+writes every field from Python — including that a nullable column takes
+`None`, that the enum compares, and that a `NOT NULL` column still
+refuses `None` on the Python side.
+
 CI runs the same gates: formatting, lints, tests on stable and beta,
-rustdoc with warnings as errors, a build on the MSRV floor, and the
-round trip against a real server — PostgreSQL 16 and 17, each as a
-service container. The config it uses is `.github/proto.ci.toml`, which
-carries no password: `password_env` points at the variable the workflow
-sets for both `proto` and `psql`.
+rustdoc with warnings as errors, a build on the MSRV floor, the round
+trip against a real server — PostgreSQL 16 and 17, each as a service
+container — and the Python interop. The config it uses is
+`.github/proto.ci.toml`, which carries no password: `password_env`
+points at the variable the workflow sets for both `proto` and `psql`.
 
 Patches are welcome on terms set out in
 [CONTRIBUTING.md](CONTRIBUTING.md) — read it before writing code, not

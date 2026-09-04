@@ -90,9 +90,9 @@ msrv:
 [group('gates')]
 check: fmt clippy test doc-check
 
-[doc('Everything, MSRV and the live database round trip included.')]
+[doc('Everything: MSRV, the round trip, and Python interop.')]
 [group('gates')]
-check-all: check msrv smoke
+check-all: check msrv smoke python
 
 # ── live ───────────────────────────────────────────────────────────
 
@@ -105,6 +105,15 @@ check-all: check msrv smoke
 [group('live')]
 smoke:
     ./scripts/smoke.sh {{ DB }}
+
+# `cargo check --features python` proves the pyo3 output compiles. Only
+# an interpreter proves anyone can use it, so this builds a real
+# extension module and reads and writes the fields from Python.
+
+[doc('Python interop for the --pyo3 output.')]
+[group('live')]
+python:
+    ./scripts/python.sh {{ DB }}
 
 # ── tidy ───────────────────────────────────────────────────────────
 

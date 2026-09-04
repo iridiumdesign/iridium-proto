@@ -131,6 +131,19 @@ fn has_serde(derives: &[String]) -> bool {
 
 /// Group full paths into `use` statements, one line per parent module.
 fn import_block(imports: &BTreeSet<String>) -> String {
+    use_block(imports, "use")
+}
+
+/// The same, as `pub use`. A type named in a struct field has to be
+/// nameable by whoever holds that struct, so an enum defined in a sibling
+/// module is re-exported here rather than merely imported — otherwise
+/// `model::item::ItemStatus` does not resolve and the caller has to know
+/// where proto happened to put it.
+fn reexport_block(imports: &BTreeSet<String>) -> String {
+    use_block(imports, "pub use")
+}
+
+fn use_block(imports: &BTreeSet<String>, keyword: &str) -> String {
     if imports.is_empty() {
         return String::new();
     }
@@ -146,16 +159,16 @@ fn import_block(imports: &BTreeSet<String>) -> String {
     for (parent, leaves) in grouped {
         if parent.is_empty() {
             for leaf in leaves {
-                out.push_str(&format!("use {leaf};\n"));
+                out.push_str(&format!("{keyword} {leaf};\n"));
             }
         } else if leaves.len() == 1 {
             out.push_str(&format!(
-                "use {parent}::{};\n",
+                "{keyword} {parent}::{};\n",
                 leaves.iter().next().unwrap()
             ));
         } else {
             let list: Vec<&str> = leaves.into_iter().collect();
-            out.push_str(&format!("use {parent}::{{{}}};\n", list.join(", ")));
+            out.push_str(&format!("{keyword} {parent}::{{{}}};\n", list.join(", ")));
         }
     }
     out.push('\n');
