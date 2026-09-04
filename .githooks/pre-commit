@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Pre-commit checks mirroring the fast half of CI (.github/workflows/ci.yml).
+# Enable once per clone with:  git config core.hooksPath .githooks
+#
+# The tests and the round trip are not here on purpose: the first is fast
+# enough to run yourself, and the second needs a database.
+
+echo "pre-commit: cargo fmt --check"
+cargo fmt --all -- --check || {
+    echo "✗ formatting — run 'just fix' and re-stage." >&2
+    exit 1
+}
+
+echo "pre-commit: cargo clippy --all-targets -D warnings"
+cargo clippy --all-targets -- -D warnings || {
+    echo "✗ clippy warnings — fix them before committing." >&2
+    exit 1
+}
+
+echo "pre-commit: ok"

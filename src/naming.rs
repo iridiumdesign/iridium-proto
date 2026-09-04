@@ -101,6 +101,18 @@ mod tests {
         assert_eq!(snake_case("NeedsWork"), "needs_work");
     }
 
+    /// A documented guarantee: output paths are built from these, so an
+    /// identifier can never carry a path separator into one. See
+    /// SECURITY.md.
+    #[test]
+    fn idents_cannot_traverse() {
+        assert_eq!(ident("../../etc/passwd"), "______etc_passwd");
+        assert_eq!(ident("/absolute"), "_absolute");
+        assert!(!ident("a/b").contains('/'));
+        assert!(!ident("a\\b").contains('\\'));
+        assert!(!ident("..").contains('.'));
+    }
+
     #[test]
     fn idents() {
         assert_eq!(ident("type"), "r#type");

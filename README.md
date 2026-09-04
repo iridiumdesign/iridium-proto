@@ -357,6 +357,11 @@ service container. The config it uses is `.github/proto.ci.toml`, which
 carries no password: `password_env` points at the variable the workflow
 sets for both `proto` and `psql`.
 
+Patches are welcome on terms set out in
+[CONTRIBUTING.md](CONTRIBUTING.md) — read it before writing code, not
+after. Security problems go through [SECURITY.md](SECURITY.md) rather
+than the public tracker.
+
 ## License
 
 MIT OR Apache-2.0.
