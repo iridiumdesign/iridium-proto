@@ -1,0 +1,39 @@
+# proto configuration
+#
+# Read from $PROTO_CONFIG, else $XDG_CONFIG_HOME/proto/proto.toml, else
+# ~/.config/proto/proto.toml. The [databases.*] shape matches steward.toml,
+# so PROTO_CONFIG can point straight at an existing steward config.
+
+# Target used when --db is omitted. Unnecessary when exactly one database
+# is defined below — that one is the default.
+default_db = "dev"
+
+[databases.dev]
+host = "localhost"
+port = 5432
+name = "canopy"
+user = "canopy"
+password = "devpass"
+# password_file = "/run/secrets/canopy_db_pass"
+# password_env  = "CANOPY_DB_PASS"
+# schema = "canopy"          # default schema for an unqualified table
+
+[databases.hive]
+url = "postgres://canopy@hive/canopy"
+
+[generate]
+derives = ["sqlx::FromRow", "Debug", "Clone", "Serialize", "Deserialize"]
+enum_derives = [
+    "sqlx::Type", "Debug", "Clone", "Copy",
+    "PartialEq", "Eq", "Serialize", "Deserialize",
+]
+pyo3_feature = "python"
+default_schema = "public"
+exclude_tables = ["_sqlx_migrations"]
+exclude_schemas = ["information_schema", "pg_catalog", "pg_toast"]
+
+# Postgres type name -> Rust path. Overrides the built-in map, and is the
+# escape hatch for types proto does not know.
+[generate.types]
+# money = "rust_decimal::Decimal"
+# geometry = "geo_types::Geometry<f64>"

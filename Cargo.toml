@@ -1,0 +1,25 @@
+[package]
+name = "iridium-proto"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["Brad Siegfreid <brad@iridiumdesign.com>"]
+description = "Generate Rust models and mappers from a live PostgreSQL schema"
+keywords = ["postgres", "codegen", "sqlx", "cli", "pyo3"]
+categories = ["command-line-utilities", "database"]
+repository = "https://github.com/iridiumdesign/iridium-proto"
+readme = "README.md"
+exclude = ["CLAUDE.md", ".github/"]
+
+[[bin]]
+name = "proto"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+serde = { version = "1", features = ["derive"] }
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "tls-rustls-ring", "postgres"] }
+thiserror = "2.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+toml = "0.8"
