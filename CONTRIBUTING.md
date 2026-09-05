@@ -147,6 +147,13 @@ this behavior is version-dependent and quietly so.
 The CI workflow runs all of this. First-time contributors need me to
 approve the run manually, so there may be a wait.
 
+## Editing generated code
+
+A regeneration corrects a file rather than replacing it: proto parses
+what is on disk and what the file should say, and edits only where they
+disagree. Comments, hand-written impls and anything else stay where they
+are. See the README section for what that does and does not cover.
+
 ## Reporting bugs
 
 Generated code that doesn't compile, SQL that doesn't run, a Postgres

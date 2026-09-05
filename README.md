@@ -13,6 +13,63 @@ Output goes to stdout by default, which is the point: from an editor,
 generated model, and `:r !proto ...` drops it in below the cursor. Pass
 `-o` or `--out-dir` when you want files instead.
 
+## Generated code you can live in
+
+Most generators make you choose. Either you never touch the output, or
+you take it over and it stops following the database. proto does
+neither: **a regeneration corrects a file rather than replacing it.**
+
+It renders what the file *should* say, parses both that and what is on
+disk, and edits only where they disagree. Here is a model six months
+in — proto's struct, with a developer's comments woven through it, their
+own `impl` below, and a field somebody has quietly got wrong:
+
+```rust
+pub struct Item {
+    pub id: Uuid,
+    // Prices are ex-VAT — checked with finance 2026-08-30.
+    pub price: Option<f64>,          // wrong: the column is numeric
+    // The tags come from the importer, not from us.
+    pub tags: Option<Vec<String>>,
+}
+
+impl Item {
+    /// Written last week.
+    pub fn dear(&self) -> bool { self.price.is_some() }
+}
+```
+
+A migration adds a `colour` column. Regenerate:
+
+```
+$ proto schema shop --out-dir src/model
+  updated src/model/item.rs
+      ~price: Option<f64> -> Option<Decimal>, +colour: Option<String>
+1 updated, 11 unchanged
+```
+
+One type replaced, one field inserted. Both comments still bracket the
+field they were written about. The `impl` is untouched. **Nothing had to
+be marked to be spared** — no regions, no `keep` tags, nothing a
+formatter or a careless merge could delete — because nothing was
+rewritten.
+
+**The database is right**, and it is right about the parts it owns:
+column names, types, nullability. Whether a field disagrees because a
+migration changed it or because somebody edited the line, proto fixes it
+and says which field and what it was. Everything else in the file is
+yours, including the order — fields are matched by name, so rearrange
+them however your team reads best and a later migration will add its
+column to the arrangement you chose.
+
+How it works: the file is parsed to a syntax tree, and each node carries
+its source range, so proto uses the tree only to *locate* — this type,
+these bytes — and patches the text in place. It never prints code back
+out of the tree, which is what would eat the comments. The same approach
+`cargo fix` uses to apply a suggestion without reformatting your file.
+
+[More on what is and is not reconciled](#editing-generated-code).
+
 ## Install
 
 ```
@@ -370,6 +427,86 @@ $ proto schema shop --out-dir src/model --prune
 Migrations are left alone by all of this: they are append-only, and an
 applied one is checksummed. A regenerated table whose CRUD has not
 changed keeps the migration it already has.
+
+## Editing generated code
+
+Generated files say *do not edit by hand*, and for the most part you
+should not — the database decides what is in them. But they are code in
+your tree, and code in your tree gets read, annotated and extended. So a
+regeneration corrects a file rather than replacing it.
+
+Proto renders what the file *should* say, parses both that and what is
+on disk, and edits only where they disagree. Take a file that has been
+lived in for a few months:
+
+```rust
+pub struct Item {
+    pub id: Uuid,
+    // Prices are ex-VAT — checked with finance 2026-08-30.
+    pub price: Option<f64>,          // somebody got this wrong
+    // The tags come from the importer, not from us.
+    pub tags: Option<Vec<String>>,
+}
+
+impl Item {
+    /// Written last week.
+    pub fn dear(&self) -> bool { self.price.is_some() }
+}
+```
+
+A migration adds a `colour` column. Regenerate:
+
+```
+  updated src/model/item.rs
+      ~price: Option<f64> -> Option<Decimal>, +colour: Option<String>
+```
+
+The wrong type is corrected and the new column arrives. Both comments
+still bracket the field they were written about, and the `impl` below is
+untouched. Nothing had to be marked to be spared, because nothing was
+rewritten — one type was replaced and one field was inserted.
+
+**The database is right.** Whether a field disagrees because a migration
+changed the column or because somebody edited the line, the file is
+wrong and proto fixes it. It says which field and what it was, so the
+correction is never silent.
+
+**Order is not.** Column order in Postgres is a storage artifact — drop
+and re-add a column and it moves to the end — and it means nothing to
+`FromRow`, which matches by name. So an existing field never moves: it
+carries the comment above it, and no comment is worth a line's
+tidiness. A new field still lands beside the neighbours the database
+gives it.
+
+This cuts both ways, which is the useful part. Fields are matched by
+name, so how a struct is arranged is your business: group the keys, put
+the interesting columns first, and proto sees a struct with all the
+right fields and nothing to do. A later migration adds its column to
+the arrangement you chose rather than undoing it.
+
+**What is not reconciled.** A file that does not parse is left alone and
+written whole, since half an edit is nothing to reason about. Enum
+variants and a mapper's methods are replaced as a unit rather than a
+line at a time — they are not somewhere a line gets edited — but only
+they are, and anything else in those files stays.
+
+**Taking a file over: delete the `@generated` line.** Without the
+marker, proto stops managing that file. It says so on every run and
+leaves it where it is:
+
+```
+$ proto database --mappers --out-dir src/model --mapper-dir src/mapper
+  left alone (not generated by proto) src/model/canopy/tree_measurement.rs
+1 left alone (not generated by proto), 91 unchanged
+```
+
+The file stops following the database, and a column added tomorrow will
+not appear in it. Rarely what you want now that edits survive on their
+own. `--force` takes it back under proto's management.
+
+The same guard protects you from a mistake: point `--out-dir` at a
+directory of hand-written code and proto refuses to overwrite any of it,
+listing what it left alone rather than failing on the first file.
 
 ## Safety
 

@@ -20,6 +20,19 @@
 //! Output goes to stdout unless a destination is given, which is what
 //! makes `:%!proto model shop.product` work from an editor buffer.
 //!
+//! # Generated code you can live in
+//!
+//! A regeneration corrects a file rather than replacing it. Proto
+//! renders what the file should say, parses both that and what is on
+//! disk, and edits only where they disagree — so a field whose type no
+//! longer matches its column is replaced, and the comment a developer
+//! wrote above it stays above it.
+//!
+//! The database is right about the parts it owns: names, types,
+//! nullability. Everything else in the file is yours, including the
+//! order, since fields are matched by name. Nothing has to be marked to
+//! be spared, because nothing is rewritten. See [`reconcile`].
+//!
 //! # What comes out
 //!
 //! A table becomes a struct. `NOT NULL` columns get a bare type and
@@ -95,9 +108,11 @@
 
 pub mod config;
 pub mod error;
+pub mod inspect;
 pub mod introspect;
 pub mod naming;
 pub mod output;
 pub mod quoting;
+pub mod reconcile;
 pub mod render;
 pub mod typemap;

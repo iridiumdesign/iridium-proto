@@ -364,6 +364,101 @@ echo "  reported the drift, and named the column"
 }
 echo "  back in step, and quiet"
 
+say "a lived-in file: proto should fix the line and leave the rest"
+# What a file looks like after a few months: proto's struct with a
+# developer's comments woven through it, their own impl below, and a
+# field somebody has quietly got wrong.
+python3 - "$WORK/src/model/item.rs" <<'PYTHON'
+import sys
+
+path = sys.argv[1]
+source = open(path).read()
+source = source.replace(
+    "    pub price: Option<Decimal>,",
+    "    // Prices are ex-VAT — checked with finance.\n"
+    "    pub price: Option<f64>,\n"
+    "    // The tags come from the importer, not from us.",
+)
+source += """
+impl Item {
+    /// Written last week.
+    pub fn dear(&self) -> bool {
+        self.price.is_some()
+    }
+}
+"""
+open(path, "w").write(source)
+PYTHON
+
+psql -q -v ON_ERROR_STOP=1 -c "ALTER TABLE $SCHEMA.item ADD COLUMN kept text;"
+"$PROTO" --db "$TARGET" schema "$SCHEMA" --pyo3 --mappers \
+    --out-dir "$WORK/src/model" --mapper-dir "$WORK/src/mapper" \
+    >"$WORK/lived.log" 2>&1
+
+# The database is right, so the wrong type is now the right one.
+grep -q "pub price: Option<Decimal>," "$WORK/src/model/item.rs" || {
+    echo "  the wrong type was not corrected" >&2
+    exit 1
+}
+# And the migration's column arrived.
+grep -q "pub kept: Option<String>," "$WORK/src/model/item.rs" || {
+    echo "  the new column did not arrive" >&2
+    exit 1
+}
+# Everything a person put there is still there, and still in order.
+for line in "Prices are ex-VAT" "tags come from the importer" "Written last week" "pub fn dear"; do
+    grep -q "$line" "$WORK/src/model/item.rs" || {
+        echo "  lost: $line" >&2
+        exit 1
+    }
+done
+python3 - "$WORK/src/model/item.rs" <<'PYTHON'
+import sys
+
+source = open(sys.argv[1]).read()
+before = source.index("Prices are ex-VAT")
+field = source.index("pub price:")
+after = source.index("tags come from the importer")
+assert before < field < after, "the comments no longer bracket the field"
+PYTHON
+(cd "$WORK" && cargo check --quiet --lib) || {
+    echo "  the corrected file does not compile" >&2
+    exit 1
+}
+echo "  corrected the line, kept the comments around it, left the impl alone"
+
+say "a hand edit inside a generated struct should be named, and put back"
+# Somebody widens a column in the code instead of in the database.
+sed -i.bak 's/pub price: Option<Decimal>,/pub price: Option<f64>,/' "$WORK/src/model/item.rs"
+rm -f "$WORK/src/model/item.rs.bak"
+"$PROTO" --db "$TARGET" schema "$SCHEMA" --pyo3 --mappers \
+    --out-dir "$WORK/src/model" --mapper-dir "$WORK/src/mapper" \
+    >"$WORK/edit.log" 2>&1
+grep -q 'price: Option<f64> -> Option<Decimal>' "$WORK/edit.log" || {
+    echo "  the edit was not reported" >&2
+    cat "$WORK/edit.log" >&2
+    exit 1
+}
+grep -q "pub price: Option<Decimal>," "$WORK/src/model/item.rs" || {
+    echo "  the edit was not put back" >&2
+    exit 1
+}
+echo "  named the field, and restored it"
+
+# Reformatting is not a change to anything that matters, and must not be
+# reported as one.
+sed -i.bak 's/pub price: Option<Decimal>,/pub price:Option<Decimal>,/' "$WORK/src/model/item.rs"
+rm -f "$WORK/src/model/item.rs.bak"
+"$PROTO" --db "$TARGET" schema "$SCHEMA" --pyo3 --mappers \
+    --out-dir "$WORK/src/model" --mapper-dir "$WORK/src/mapper" \
+    >"$WORK/reformat.log" 2>&1
+if grep -q 'price:' "$WORK/reformat.log"; then
+    echo "  reformatting was reported as a field change" >&2
+    cat "$WORK/reformat.log" >&2
+    exit 1
+fi
+echo "  said nothing about reformatting, which is nothing"
+
 say "dropping a table: --prune should take back what proto put there"
 printf 'pub fn helper() {}\n' > "$WORK/src/model/handwritten.rs"
 psql -q -v ON_ERROR_STOP=1 -c "DROP TABLE $SCHEMA.\"order\" CASCADE;"
