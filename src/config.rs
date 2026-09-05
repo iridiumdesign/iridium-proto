@@ -256,8 +256,9 @@ impl Target {
     ///
     /// # Errors
     ///
-    /// [`Error::NoPassword`] when none of
-    /// the password sources yield one, or a parse failure on a bad `url`.
+    /// A parse failure on a bad `url`. A target with no password is not
+    /// an error: a server set to `trust` wants none, and one that does
+    /// want a password says so itself when the connection is made.
     pub fn from_config(name: &str, target: &DbTarget) -> Result<Self> {
         if let Some(url) = &target.url {
             let mut resolved = Self::from_url(url, name)?;
@@ -276,14 +277,18 @@ impl Target {
             .or_else(|| std::env::var("USER").ok())
             .unwrap_or_else(|| "postgres".to_string());
 
-        let password = resolve_password(target, host, port, db, &user)?;
-
-        let options = PgConnectOptions::new()
+        let mut options = PgConnectOptions::new()
             .host(host)
             .port(port)
             .database(db)
-            .username(&user)
-            .password(&password);
+            .username(&user);
+
+        // A server set to `trust` wants no password at all, so not
+        // finding one is not an error. If the server does want one,
+        // saying so is its job and its message is better than a guess.
+        if let Some(password) = resolve_password(target, host, port, db, &user) {
+            options = options.password(&password);
+        }
 
         Ok(Self {
             label: name.to_string(),
@@ -293,37 +298,39 @@ impl Target {
     }
 }
 
+/// The password for a target, if there is one to find.
+///
+/// In order: the config's own `password`, a `password_file`, a
+/// `password_env`, `$PGPASSWORD`, then `~/.pgpass`. `None` means none of
+/// them had one, which is the right answer for a server that does not
+/// ask.
 fn resolve_password(
     target: &DbTarget,
     host: &str,
     port: u16,
     db: &str,
     user: &str,
-) -> Result<String> {
+) -> Option<String> {
     if let Some(p) = &target.password {
-        return Ok(p.clone());
+        return Some(p.clone());
     }
     if let Some(path) = &target.password_file {
-        let contents = std::fs::read_to_string(path).map_err(|source| Error::ReadFile {
-            path: PathBuf::from(path),
-            source,
-        })?;
-        return Ok(contents.trim().to_string());
+        match std::fs::read_to_string(path) {
+            Ok(contents) => return Some(contents.trim().to_string()),
+            Err(e) => {
+                crate::output::warn(&format!("could not read password_file {path}: {e}"));
+            }
+        }
     }
     if let Some(var) = &target.password_env
         && let Ok(p) = std::env::var(var)
     {
-        return Ok(p);
+        return Some(p);
     }
     if let Ok(p) = std::env::var("PGPASSWORD") {
-        return Ok(p);
+        return Some(p);
     }
-    if let Some(p) = pgpass_lookup(host, port, db, user) {
-        return Ok(p);
-    }
-    Err(Error::NoPassword {
-        name: db.to_string(),
-    })
+    pgpass_lookup(host, port, db, user)
 }
 
 /// Look up `host:port:database:user:password` in `~/.pgpass`, honouring the

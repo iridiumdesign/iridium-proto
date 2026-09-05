@@ -48,9 +48,11 @@ PROTO_CONFIG=~/.config/other-tool/other.toml proto --db dev list
 ```
 
 Passwords resolve in this order: `password`, `password_file`,
-`password_env`, `$PGPASSWORD`, `~/.pgpass` (or `$PGPASSFILE`). A target
-may also carry a single `url`, and `--url` or `$DATABASE_URL` skips the
-config file entirely.
+`password_env`, `$PGPASSWORD`, `~/.pgpass` (or `$PGPASSFILE`). None of
+them is required — a server set to `trust`, which a local development
+one often is, wants no password and a target can simply omit it. A
+target may also carry a single `url`, and `--url` or `$DATABASE_URL`
+skips the config file entirely.
 
 `proto config` prints the resolved file, its targets, and the generation
 defaults.
@@ -570,7 +572,8 @@ needs a database.
 cases that decide output, generates models, mappers and functions from
 it, compiles the result as its own crate, applies the functions and
 exercises them, then rolls back and drops the schema. Point it at a
-target with `PROTO_SMOKE_DB`, or run `./scripts/smoke.sh <target>`.
+target with `PROTO_SMOKE_DB`, or run `./scripts/smoke.sh <target>`;
+given neither, they use whatever `proto config` reports as the default.
 
 `just python` needs a database and an interpreter. `cargo check
 --features python` only proves the pyo3 output compiles; this builds a

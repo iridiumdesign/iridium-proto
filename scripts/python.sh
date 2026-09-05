@@ -9,12 +9,13 @@
 #
 #   ./scripts/python.sh [target]
 #
-# `target` is a database target from the proto config; default `dev`.
-# Set PROTO_CONFIG to point at a config other than the default.
+# `target` is a database target from the proto config. Omitted, proto's
+# own default is used — `default_db`, or the only database defined. Set
+# PROTO_CONFIG to point at a config other than the default.
 
 set -eu
 
-TARGET="${1:-dev}"
+TARGET="${1:-}"
 SCHEMA="proto_python"
 WORK="$(mktemp -d)"
 PROTO="${CARGO_TARGET_DIR:-target}/debug/proto"
@@ -27,11 +28,28 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Which target to use when the caller named none: whichever proto would
+# have picked on its own, rather than a name invented here.
+default_target() {
+    if [ -n "$1" ]; then
+        printf '%s' "$1"
+        return
+    fi
+    chosen=$("$PROTO" config | awk '$1 == "default:" { print $2 }')
+    if [ -z "$chosen" ] || [ "$chosen" = "(none)" ]; then
+        echo "  no target given and no default in the proto config" >&2
+        echo "  set default_db, define one database, or pass a target" >&2
+        exit 1
+    fi
+    printf '%s' "$chosen"
+}
+
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 
 say "building proto"
 cargo build --quiet
 
+TARGET=$(default_target "$TARGET")
 WHERE=$("$PROTO" config | awk -v t="$TARGET" '$1 == t && $2 == "->" { print $3 }')
 if [ -z "$WHERE" ]; then
     echo "  no target '$TARGET' in the proto config" >&2
@@ -39,7 +57,12 @@ if [ -z "$WHERE" ]; then
 fi
 PSQL_HOST="${WHERE%%/*}"
 PSQL_DB="${WHERE#*/}"
-psql() { command psql -h "$PSQL_HOST" -d "$PSQL_DB" "$@"; }
+# NOTICE is what `DROP ... IF EXISTS` says about a first run, and what
+# CASCADE says about doing its job. Neither is news; warnings still are.
+psql() {
+    PGOPTIONS='-c client_min_messages=warning' \
+        command psql -h "$PSQL_HOST" -d "$PSQL_DB" "$@"
+}
 
 say "creating $SCHEMA in $PSQL_HOST/$PSQL_DB"
 # One table, spread across the conversions that have to hold: a uuid, an

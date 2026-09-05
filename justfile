@@ -8,8 +8,9 @@
 # field cannot drift apart silently. Let chains put it at 1.88.
 MSRV := "1.88"
 
-# Database the live gates run against. Any target in the proto config.
-DB := env("PROTO_SMOKE_DB", "dev")
+# Database the live gates run against. Any target in the proto config;
+# empty means whichever one proto would pick on its own.
+DB := env("PROTO_SMOKE_DB", "")
 
 # List the recipes. Hidden: `just` runs it, nobody types it.
 [private]

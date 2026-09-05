@@ -359,6 +359,12 @@ impl Journal {
         self.entries.iter().any(|e| e.change.is_change())
     }
 
+    /// Whether this run touched files at all. A command that only reads
+    /// has nothing to summarise.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     /// What happened, for stderr. Unchanged files are counted, not
     /// listed: a run that says nothing but "unchanged" is the point.
     pub fn summary(&self) -> String {

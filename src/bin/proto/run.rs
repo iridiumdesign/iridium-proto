@@ -34,8 +34,9 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
     let outcome = run(&cli, &pool, &target, &generate, &mut journal).await;
 
     // A run that touched files says what it did, even when it failed
-    // partway: knowing which half landed is the point of the summary.
-    if !journal.summary().is_empty() {
+    // partway: knowing which half landed is the point of the summary. A
+    // command that only reads has nothing to say.
+    if !journal.is_empty() {
         eprint!("{}", journal.summary());
     }
     outcome?;

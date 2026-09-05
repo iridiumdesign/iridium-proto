@@ -74,15 +74,6 @@ pub enum Error {
         path: PathBuf,
     },
 
-    /// A target was selected but no password could be found for it.
-    #[error(
-        "no password for target '{name}'\n  set password, password_file, password_env, PGPASSWORD, or ~/.pgpass"
-    )]
-    NoPassword {
-        /// The database the password was wanted for.
-        name: String,
-    },
-
     /// Connecting, or a catalog query, failed.
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),

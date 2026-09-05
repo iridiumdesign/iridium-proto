@@ -94,9 +94,21 @@ exercises every one of them, and checks that a rerun writes no duplicate
 migration. Then it rolls back and drops the schema.
 
 ```sh
-./scripts/smoke.sh <target>          # a target from your proto config
-PROTO_SMOKE_DB=<target> just smoke
+just smoke                           # whichever target proto defaults to
+PROTO_SMOKE_DB=<target> just smoke   # a particular one
+./scripts/smoke.sh <target>          # the same, without just
 ```
+
+Naming a target is optional: given none, the scripts use whatever
+`proto config` reports as the default — `default_db`, or the only
+database defined. They do not assume a target called `dev` exists.
+
+It also runs the generated mappers, both strategies, against the server:
+insert, every derived finder, `list`, a full-replace update and a delete,
+asserting each column type decodes and that a `None` on a defaulted
+column gets the default. Compiling proves the types line up; only this
+proves they decode — an enum whose `type_name` does not match what the
+server reports gets past every other gate in this repository.
 
 CI runs it against PostgreSQL 16 and 17. If you touch the renderers or
 the catalog queries, run it before you send the patch — the unit tests

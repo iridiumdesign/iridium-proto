@@ -267,18 +267,32 @@ fn enum_block(e: &PgEnum, opts: &Opts, imports: &mut BTreeSet<String>) -> String
         .zip(&variants)
         .all(|(label, variant)| &naming::snake_case(variant) == label);
 
+    // sqlx matches the type name the server reports. A type outside
+    // `public` is not on the default search_path, so the server names it
+    // with its schema and the attribute has to as well — without this an
+    // enum column fails to decode at run time, which compiling never
+    // catches.
+    let type_name = if e.schema == "public" {
+        e.name.clone()
+    } else {
+        format!("{}.{}", e.schema, e.name)
+    };
+
     let mut out = format!("/// The `{}.{}` enum type.\n", e.schema, e.name);
     out.push_str(&derive_line(&opts.generate.enum_derives, imports));
     if round_trips {
         out.push_str(&format!(
             "#[sqlx(type_name = \"{}\", rename_all = \"snake_case\")]\n",
-            escape(&e.name)
+            escape(&type_name)
         ));
         if has_serde(&opts.generate.enum_derives) {
             out.push_str("#[serde(rename_all = \"snake_case\")]\n");
         }
     } else {
-        out.push_str(&format!("#[sqlx(type_name = \"{}\")]\n", escape(&e.name)));
+        out.push_str(&format!(
+            "#[sqlx(type_name = \"{}\")]\n",
+            escape(&type_name)
+        ));
     }
     if opts.pyo3 {
         out.push_str(&format!(
@@ -484,6 +498,38 @@ mod tests {
         assert!(out.contains("rename_all = \"snake_case\""), "{out}");
         assert!(out.contains("    Open,"), "{out}");
         assert!(out.contains("    NeedsWork,"), "{out}");
+    }
+
+    /// sqlx compares against the name the server reports, and a type
+    /// outside `public` is reported with its schema. Getting this wrong
+    /// compiles fine and fails when a row comes back.
+    #[test]
+    fn enum_types_outside_public_are_schema_qualified() {
+        let generate = Generate::default();
+        let opts = fixture::opts(&generate, Strategy::Embedded);
+        let mut imports = BTreeSet::new();
+
+        let e = PgEnum {
+            schema: "shop".into(),
+            name: "product_status".into(),
+            labels: vec!["draft".into()],
+        };
+        let out = enum_block(&e, &opts, &mut imports);
+        assert!(
+            out.contains(r#"type_name = "shop.product_status""#),
+            "{out}"
+        );
+
+        // `public` is on the default search_path, so the server names it
+        // bare and so does the attribute.
+        let public = PgEnum {
+            schema: "public".into(),
+            ..e
+        };
+        let out = enum_block(&public, &opts, &mut imports);
+        assert!(out.contains(r#"type_name = "product_status""#), "{out}");
+        // The doc comment still names the schema; the attribute must not.
+        assert!(!out.contains(r#"type_name = "public."#), "{out}");
     }
 
     #[test]
