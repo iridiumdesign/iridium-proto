@@ -30,8 +30,10 @@
 //!
 //! The database is right about the parts it owns: names, types,
 //! nullability. Everything else in the file is yours, including the
-//! order, since fields are matched by name. Nothing has to be marked to
-//! be spared, because nothing is rewritten. See [`reconcile`].
+//! order, since fields are matched by name. Mappers work the same way a
+//! method at a time: proto owns the ones it derives from the catalog and
+//! nothing else in the block. Nothing has to be marked to be spared,
+//! because nothing is rewritten. See [`reconcile`].
 //!
 //! # What comes out
 //!

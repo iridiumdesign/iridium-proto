@@ -58,9 +58,19 @@ pub fn reconcile(existing: &str, rendered: &str) -> Option<String> {
                 (syn::Item::Struct(have), syn::Item::Struct(want)) => {
                     fields(have, want, &offsets, existing, &mut edits);
                 }
-                // An enum's variants or a mapper's methods are not
-                // somewhere a person edits a line at a time, so those
-                // are replaced as a whole — but only they are.
+                (syn::Item::Impl(have), syn::Item::Impl(want)) => {
+                    methods(
+                        have,
+                        want,
+                        &offsets,
+                        existing,
+                        rendered,
+                        &rendered_offsets,
+                        &mut edits,
+                    );
+                }
+                // An enum's variants are not somewhere a line gets
+                // edited, so they are replaced as a whole.
                 _ if !same(have, want) => {
                     let (start, end) = span_of(have, &offsets);
                     edits.push(Edit {
@@ -212,7 +222,106 @@ fn fields(
     }
 }
 
+/// Reconcile one impl block a method at a time.
+///
+/// Proto owns the methods it derives from the catalog: a `create` whose
+/// column list is out of date is put back, because the statement it
+/// runs is wrong. It owns nothing else in the block. A method somebody
+/// added — a query the schema does not imply and proto would never
+/// derive — is not proto's to have an opinion about, and is left where
+/// it is.
+#[allow(clippy::too_many_arguments)]
+fn methods(
+    have: &syn::ItemImpl,
+    want: &syn::ItemImpl,
+    offsets: &Offsets,
+    source: &str,
+    rendered: &str,
+    rendered_offsets: &Offsets,
+    edits: &mut Vec<Edit>,
+) {
+    let name_of = |item: &syn::ImplItem| match item {
+        syn::ImplItem::Fn(f) => Some(f.sig.ident.to_string()),
+        _ => None,
+    };
+    let here: Vec<String> = have.items.iter().filter_map(name_of).collect();
+
+    // A method proto generates, that says something else now, is put
+    // back. Only that method: the ones around it, and whatever sits
+    // between them, do not move.
+    for item in &have.items {
+        let Some(name) = name_of(item) else { continue };
+        let Some(target) = want
+            .items
+            .iter()
+            .find(|i| name_of(i).as_deref() == Some(&name))
+        else {
+            continue; // not proto's method
+        };
+        if normalise(item) != normalise(target) {
+            edits.push(Edit {
+                start: item_start(item, offsets),
+                end: offsets.of(item.span().end()),
+                text: rendered[item_start(target, rendered_offsets)
+                    ..rendered_offsets.of(target.span().end())]
+                    .to_string(),
+            });
+        }
+    }
+
+    // A method the file does not have goes in after the last one it
+    // does, so proto's stay together and nobody else's move.
+    let order: Vec<String> = want.items.iter().filter_map(name_of).collect();
+    let mut additions: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+    for (index, name) in order.iter().enumerate() {
+        if here.contains(name) {
+            continue;
+        }
+        let Some(item) = want
+            .items
+            .iter()
+            .find(|i| name_of(i).as_deref() == Some(name))
+        else {
+            continue;
+        };
+        let anchor = order[..index]
+            .iter()
+            .rev()
+            .find(|earlier| here.contains(earlier))
+            .and_then(|earlier| {
+                have.items
+                    .iter()
+                    .find(|i| name_of(i).as_deref() == Some(earlier.as_str()))
+            });
+
+        let at = match anchor {
+            Some(previous) => line_end(source, offsets.of(previous.span().end())),
+            None => line_end(source, offsets.of(have.brace_token.span.open().end())),
+        };
+        let text = rendered
+            [item_start(item, rendered_offsets)..rendered_offsets.of(item.span().end())]
+            .to_string();
+        additions
+            .entry(at)
+            .or_default()
+            .push(format!("\n\n    {text}"));
+    }
+    for (at, blocks) in additions {
+        edits.push(Edit {
+            start: at,
+            end: at,
+            text: blocks.concat(),
+        });
+    }
+}
+
 // ── Text and positions ──────────────────────────────────────────────────────
+
+/// Where an item really begins: at its first attribute, since a doc
+/// comment is one and belongs to what it documents.
+fn item_start(item: &impl Spanned, offsets: &Offsets) -> usize {
+    offsets.of(item.span().start())
+}
 
 /// What an item is, for matching one file's against another's.
 fn key(item: &syn::Item) -> Option<String> {
@@ -234,7 +343,7 @@ fn impl_target(item: &syn::ItemImpl) -> Option<String> {
     }
 }
 
-fn normalise(item: &impl ToTokens) -> String {
+fn normalise<T: ToTokens + ?Sized>(item: &T) -> String {
     item.to_token_stream().to_string().replace(' ', "")
 }
 
@@ -499,6 +608,84 @@ pub struct Item {
         assert!(out.contains("pub colour: Option<String>,"), "{out}");
         assert!(out.find("pub colour:").unwrap() > id, "{out}");
         assert!(syn::parse_file(&out).is_ok(), "{out}");
+    }
+
+    /// A mapper as it looks once somebody has worked in it: proto's
+    /// methods, and one of their own the schema does not imply.
+    const MAPPER: &str = r#"// @generated by proto 0.1.0 — do not edit by hand.
+
+use sqlx::PgPool;
+
+impl<'a> ItemMapper<'a> {
+    /// Look up the row identified by `id`.
+    pub async fn find_by_id(&self, id: Uuid) -> Result<Option<Item>, sqlx::Error> {
+        sqlx::query_as("SELECT * FROM mp.item WHERE id = $1")
+            .bind(id)
+            .fetch_optional(self.pool)
+            .await
+    }
+
+    // Ours, not proto's — the schema does not imply this one.
+    pub async fn cheapest(&self) -> Result<Option<Item>, sqlx::Error> {
+        sqlx::query_as("SELECT * FROM mp.item ORDER BY price LIMIT 1")
+            .fetch_optional(self.pool)
+            .await
+    }
+}
+"#;
+
+    #[test]
+    fn a_method_proto_does_not_generate_is_not_proto_s_to_touch() {
+        // Proto's own method has moved on; theirs is not in the render
+        // at all.
+        let rendered = MAPPER
+            .replace(
+                r#"sqlx::query_as("SELECT * FROM mp.item WHERE id = $1")"#,
+                r#"sqlx::query_as("SELECT * FROM mp.item WHERE id = $1 AND live")"#,
+            )
+            .replace(
+                "    // Ours, not proto's — the schema does not imply this one.\n",
+                "",
+            );
+        let rendered = rendered[..rendered.find("pub async fn cheapest").unwrap()]
+            .trim_end()
+            .to_string()
+            + "\n}\n";
+
+        let out = reconcile(MAPPER, &rendered).expect("both parse");
+
+        // Proto's method was put back to what proto says.
+        assert!(out.contains("WHERE id = $1 AND live"), "{out}");
+        // Theirs is untouched, comment and all.
+        assert!(out.contains("// Ours, not proto's"), "{out}");
+        assert!(out.contains("pub async fn cheapest"), "{out}");
+        assert!(out.contains("ORDER BY price LIMIT 1"), "{out}");
+        assert!(syn::parse_file(&out).is_ok(), "{out}");
+    }
+
+    #[test]
+    fn a_new_method_joins_the_block_without_moving_anyone() {
+        let rendered = MAPPER.replace(
+            "    // Ours, not proto's — the schema does not imply this one.\n    pub async fn cheapest(&self) -> Result<Option<Item>, sqlx::Error> {\n        sqlx::query_as(\"SELECT * FROM mp.item ORDER BY price LIMIT 1\")\n            .fetch_optional(self.pool)\n            .await\n    }\n",
+            "    pub async fn list(&self) -> Result<Vec<Item>, sqlx::Error> {\n        sqlx::query_as(\"SELECT * FROM mp.item\")\n            .fetch_all(self.pool)\n            .await\n    }\n",
+        );
+        let out = reconcile(MAPPER, &rendered).expect("both parse");
+
+        assert!(
+            out.contains("pub async fn list"),
+            "the new method arrived: {out}"
+        );
+        assert!(
+            out.contains("pub async fn cheapest"),
+            "theirs survived: {out}"
+        );
+        assert!(out.contains("// Ours, not proto's"), "{out}");
+        assert!(syn::parse_file(&out).is_ok(), "{out}");
+    }
+
+    #[test]
+    fn an_untouched_mapper_is_returned_as_it_was() {
+        assert_eq!(reconcile(MAPPER, MAPPER).unwrap(), MAPPER);
     }
 
     #[test]

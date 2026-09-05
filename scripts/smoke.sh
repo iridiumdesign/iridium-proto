@@ -427,6 +427,54 @@ PYTHON
 }
 echo "  corrected the line, kept the comments around it, left the impl alone"
 
+say "a method somebody added to a mapper should outlive a migration"
+python3 - "$WORK/src/mapper/item.rs" <<'PYTHON'
+import sys
+
+path = sys.argv[1]
+source = open(path).read()
+anchor = "    /// Look up the row identified by `id`."
+source = source.replace(anchor, """    // Ours, for the admin screen — proto would never derive this.
+    pub async fn cheapest(&self) -> Result<Option<Item>, sqlx::Error> {
+        sqlx::query_as("SELECT * FROM proto_smoke.item ORDER BY price LIMIT 1")
+            .fetch_optional(self.pool)
+            .await
+    }
+
+""" + anchor, 1)
+open(path, "w").write(source)
+PYTHON
+cp "$WORK/src/mapper/item.rs" "$WORK/mapper-before.rs"
+
+psql -q -v ON_ERROR_STOP=1 -c "ALTER TABLE $SCHEMA.item ADD COLUMN shade text;"
+"$PROTO" --db "$TARGET" schema "$SCHEMA" --pyo3 --mappers \
+    --out-dir "$WORK/src/model" --mapper-dir "$WORK/src/mapper" >/dev/null 2>&1
+
+grep -q "pub async fn cheapest" "$WORK/src/mapper/item.rs" || {
+    echo "  the hand-written method was lost" >&2
+    exit 1
+}
+grep -q "Ours, for the admin screen" "$WORK/src/mapper/item.rs" || {
+    echo "  its comment was lost" >&2
+    exit 1
+}
+grep -q "shade" "$WORK/src/mapper/item.rs" || {
+    echo "  the new column never reached the statements" >&2
+    exit 1
+}
+# Only the methods whose SQL changed should have moved.
+changed=$(diff "$WORK/mapper-before.rs" "$WORK/src/mapper/item.rs" | grep -c '^[<>]' || true)
+[ "$changed" -lt 20 ] || {
+    echo "  a column change rewrote more of the mapper than it should ($changed lines)" >&2
+    diff "$WORK/mapper-before.rs" "$WORK/src/mapper/item.rs" >&2
+    exit 1
+}
+(cd "$WORK" && cargo check --quiet --lib) || {
+    echo "  the reconciled mapper does not compile" >&2
+    exit 1
+}
+echo "  kept their method, updated only the statements that changed"
+
 say "a hand edit inside a generated struct should be named, and put back"
 # Somebody widens a column in the code instead of in the database.
 sed -i.bak 's/pub price: Option<Decimal>,/pub price: Option<f64>,/' "$WORK/src/model/item.rs"

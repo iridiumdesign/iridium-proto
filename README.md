@@ -68,7 +68,9 @@ these bytes — and patches the text in place. It never prints code back
 out of the tree, which is what would eat the comments. The same approach
 `cargo fix` uses to apply a suggestion without reformatting your file.
 
-[More on what is and is not reconciled](#editing-generated-code).
+Mappers get the same treatment, a method at a time: a migration updates
+the statements it invalidates and leaves the query you wrote by hand
+alone. [More on what is and is not reconciled](#editing-generated-code).
 
 ## Install
 
@@ -484,11 +486,27 @@ the interesting columns first, and proto sees a struct with all the
 right fields and nothing to do. A later migration adds its column to
 the arrangement you chose rather than undoing it.
 
+**Mappers work the same way, per method.** Proto owns the methods it
+derives from the catalog, so a `create` whose column list is out of date
+is put back. It owns nothing else in the block: a query you added
+because the schema does not imply it is not proto's to have an opinion
+about. Adding a column to a table touches `create` and `update` and
+leaves every other method — including yours — byte for byte as it was.
+
+```
+$ diff before.rs after.rs
+<                  (id, slug, price)
+>                  (id, slug, price, colour)
+<              VALUES ($1, $2, $3)
+>              VALUES ($1, $2, $3, $4)
+>         .bind(&new.colour)
+```
+
 **What is not reconciled.** A file that does not parse is left alone and
 written whole, since half an edit is nothing to reason about. Enum
-variants and a mapper's methods are replaced as a unit rather than a
-line at a time — they are not somewhere a line gets edited — but only
-they are, and anything else in those files stays.
+variants are replaced as a unit rather than one at a time — a variant
+list is not somewhere a line gets edited — but only they are, and
+anything else in that file stays.
 
 **Taking a file over: delete the `@generated` line.** Without the
 marker, proto stops managing that file. It says so on every run and
