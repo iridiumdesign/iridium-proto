@@ -1,0 +1,21 @@
+#!/usr/bin/env sh
+#
+# Pre-commit: the fast gate. Runs `just check` — fmt, clippy, tests, and
+# rustdoc with warnings promoted — and refuses the commit if any fail.
+# No database needed.
+#
+# Enable once per clone:
+#
+#   git config core.hooksPath .githooks
+#
+# Skip for a single commit with `git commit --no-verify`.
+
+set -eu
+
+if ! command -v just >/dev/null 2>&1; then
+    echo "pre-commit: 'just' not found; install with: cargo install --locked just" >&2
+    exit 1
+fi
+
+cd "$(git rev-parse --show-toplevel)"
+exec just check

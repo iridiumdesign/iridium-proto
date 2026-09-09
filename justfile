@@ -17,6 +17,16 @@ DB := env("PROTO_SMOKE_DB", "")
 default:
     @just --list --unsorted
 
+# ── setup ──────────────────────────────────────────────────────────
+
+# Git never enables hooks from a clone on its own; this is the once-per-
+# clone step that does. The hook itself is .githooks/pre-commit.
+
+[doc('Enable the pre-commit hook for this clone.')]
+[group('setup')]
+setup:
+    git config core.hooksPath .githooks
+
 # ── build ──────────────────────────────────────────────────────────
 
 [doc('Build the library and the proto binary.')]

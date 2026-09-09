@@ -66,12 +66,15 @@ bad one right before you open a pull request.
 
 `just fix` reformats in place.
 
-There is a pre-commit hook that runs the two fast gates. Enable it once
-per clone:
+There is a pre-commit hook that runs `just check`. Git does not enable
+hooks from a clone on its own, so turn it on once per clone:
 
 ```sh
-git config core.hooksPath .githooks
+just setup
 ```
+
+That sets `core.hooksPath` to `.githooks` in your local config. Skip
+the hook for a single commit with `git commit --no-verify`.
 
 If you'd rather not install anything, the same gate by hand:
 
