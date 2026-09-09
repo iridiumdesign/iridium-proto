@@ -12,7 +12,7 @@ keywords = ["postgres", "codegen", "sqlx", "cli", "pyo3"]
 categories = ["command-line-utilities", "database"]
 repository = "https://github.com/iridiumdesign/iridium-proto"
 readme = "README.md"
-exclude = ["CLAUDE.md", ".github/", "branding/"]
+exclude = ["CLAUDE.md", ".github/", ".githooks/", "branding/", "justfile", "scripts/"]
 
 [[bin]]
 name = "proto"
