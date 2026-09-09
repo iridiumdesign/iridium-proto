@@ -1,0 +1,16 @@
+# proto configuration for CI.
+#
+# The workflow points PROTO_CONFIG here, so scripts/smoke.sh and
+# scripts/python.sh find the service container the same way they find
+# any other target: by asking proto. Nothing in this file is a secret.
+# `password_env` names the variable the workflow sets, and psql reads
+# the same one, so proto and psql cannot disagree about the password.
+
+default_db = "ci"
+
+[databases.ci]
+host = "localhost"
+port = 5432
+name = "proto"
+user = "postgres"
+password_env = "PGPASSWORD"

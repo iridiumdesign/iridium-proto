@@ -1,0 +1,116 @@
+# The gates. The justfile mirrors these for local use; if the two ever
+# disagree, this file is the authority and the justfile is the bug.
+#
+#   check       fmt, clippy with warnings as errors, rustdoc with
+#               warnings promoted. No database.
+#   test        cargo test on stable and beta. No database.
+#   msrv        a build on the floor Cargo.toml promises.
+#   round-trip  scripts/smoke.sh and scripts/python.sh against a real
+#               server, PostgreSQL 16 and 17 as service containers.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch supersedes the run in flight.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: fmt, clippy, docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      # A broken intra-doc link is only a warning by default, so docs.rs
+      # renders it and nobody notices. Promote it.
+      - run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  test:
+    name: test (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, beta]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+
+  msrv:
+    name: msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Read the floor from the manifest rather than naming it here, so
+      # raising rust-version raises this gate with it.
+      - id: msrv
+        run: |
+          version=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build
+
+  round-trip:
+    name: round trip (postgres ${{ matrix.postgres }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["16", "17"]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: proto
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # proto reads the config; psql reads PGUSER and PGPASSWORD. The
+      # config's password_env names PGPASSWORD, so both see one value.
+      PROTO_CONFIG: .github/proto.ci.toml
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      # Absolute, so the scratch crate the scripts build in a temp dir
+      # lands in the same cached target as everything else.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: psql --version && python3 --version
+      - run: ./scripts/smoke.sh
+      - run: ./scripts/python.sh
