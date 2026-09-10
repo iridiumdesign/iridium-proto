@@ -83,12 +83,13 @@ CREATE TABLE $SCHEMA.item (
 );
 SQL
 
-say "generating models with --pyo3 and a #[pymodule]"
-mkdir -p "$WORK/src/model" "$WORK/.cargo"
+say "generating models and mappers with --pyo3 and a #[pymodule]"
+mkdir -p "$WORK/src/model" "$WORK/src/mapper" "$WORK/.cargo"
 # An extension crate declares pyo3 itself, not optional, because the
 # whole crate is the extension. proto sees that and writes a feature
 # that lists the conversions only, with no `dep:pyo3`. Everything else
-# the generated code needs, it adds.
+# the generated code needs, it adds — tokio included, since the mappers'
+# Python classes run on a runtime the generated Database holds.
 cat > "$WORK/Cargo.toml" <<'TOML'
 [package]
 name = "protopy"
@@ -103,13 +104,19 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.26", features = ["extension-module"] }
 TOML
 "$PROTO" --db "$TARGET" schema "$SCHEMA" --pyo3 --pymodule protopy \
-    --out-dir "$WORK/src/model"
-grep -qF 'python = ["pyo3/chrono", "pyo3/uuid", "pyo3/rust_decimal"]' \
-    "$WORK/Cargo.toml" || {
-    echo "  proto did not write the conversions-only feature" >&2
-    cat "$WORK/Cargo.toml" >&2
+    --mappers --out-dir "$WORK/src/model" --mapper-dir "$WORK/src/mapper"
+test -f "$WORK/src/mapper/python.rs" || {
+    echo "  no bridge written beside the mappers" >&2
     exit 1
 }
+for needed in 'python = ["pyo3/chrono", "pyo3/uuid", "pyo3/rust_decimal"]' \
+    'tokio = {'; do
+    grep -qF "$needed" "$WORK/Cargo.toml" || {
+        echo "  Cargo.toml is missing: $needed" >&2
+        cat "$WORK/Cargo.toml" >&2
+        exit 1
+    }
+done
 
 say "building an extension module from them"
 
@@ -124,9 +131,10 @@ rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
 TOML
 
 # What a consumer writes when the extension needs functions of its own:
-# their own module, calling the generated `register` rather than listing
-# the classes by hand. `sample` stands in for a mapper handing an object
-# back after a query, since generated structs have no constructor.
+# their own module, calling the generated `register`s rather than listing
+# the classes by hand — the models' first, since the mappers hand those
+# back. `sample` builds a row in Rust, since row structs have no
+# constructor: they come from the database.
 #
 # The generated `#[pymodule] protopy` is compiled too, and is what a
 # consumer who needs nothing else would import directly.
@@ -135,6 +143,7 @@ use pyo3::prelude::*;
 use rust_decimal::Decimal;
 use std::str::FromStr;
 
+pub mod mapper;
 pub mod model;
 use model::item::{Item, ItemStatus};
 
@@ -156,6 +165,7 @@ fn sample() -> Item {
 #[pymodule]
 fn protopy_test(m: &Bound<'_, PyModule>) -> PyResult<()> {
     model::python::register(m)?;
+    mapper::python::register(m)?;
     m.add_function(wrap_pyfunction!(sample, m)?)?;
     Ok(())
 }
@@ -181,16 +191,21 @@ fi
 cp "$BUILT" "$WORK/protopy_test$SUFFIX"
 
 say "importing it and using the object"
-(cd "$WORK" && python3 - <<'PY'
+# The same defaults libpq uses, so this works wherever psql already does.
+DATABASE_URL="postgres://${PGUSER:-$(id -un)}${PGPASSWORD:+:$PGPASSWORD}@$PSQL_HOST/$PSQL_DB"
+(cd "$WORK" && PROTO_TEST_URL="$DATABASE_URL" python3 - <<'PY'
 import datetime
 import decimal
+import os
 import uuid
 
 import protopy_test as protopy
 
-# Registered by the generated `register`, not by hand.
+# Registered by the generated `register`s, not by hand.
 assert hasattr(protopy, "Item") and hasattr(protopy, "ItemStatus")
-print("  classes registered by the generated module")
+assert hasattr(protopy, "NewItem") and hasattr(protopy, "ItemMapper")
+assert hasattr(protopy, "Database") and hasattr(protopy, "ProtoError")
+print("  classes registered by the generated modules")
 
 it = protopy.sample()
 
@@ -250,6 +265,57 @@ for attr, bad in (("count", "not an int"), ("slug", None), ("tags", 3)):
     else:
         raise AssertionError(f"{attr} accepted {bad!r}")
 print("  typing  enforced")
+
+# The mapper, from Python: the whole round trip through the generated
+# class, on a real connection, with the rows coming back as the classes
+# registered above.
+db = protopy.Database(os.environ["PROTO_TEST_URL"])
+items = protopy.ItemMapper(db)
+
+# Required columns are positional; the defaulted and nullable ones are
+# keyword-only, and leaving them out leaves them to the database.
+made = items.create(protopy.NewItem("widget", price=decimal.Decimal("9.99")))
+assert isinstance(made, protopy.Item), type(made)
+assert made.slug == "widget"
+assert made.status == protopy.ItemStatus.Draft, "the column default"
+assert made.count == 0, "the column default"
+assert made.price == decimal.Decimal("9.99")
+assert made.created_at.tzinfo is not None, "the server filled this in"
+print("  create  ok")
+
+found = items.find_by_id(made.id)
+assert found is not None and found.id == made.id
+assert items.find_by_id(uuid.uuid4()) is None, "a miss is None, not an error"
+assert any(i.id == made.id for i in items.list())
+print("  find    ok")
+
+found.slug = "changed"
+found.status = protopy.ItemStatus.Active
+found.tags = ["x", "y"]
+updated = items.update(found)
+assert updated.slug == "changed"
+assert updated.status == protopy.ItemStatus.Active
+assert updated.tags == ["x", "y"]
+print("  update  ok")
+
+items.delete(made.id)
+assert items.find_by_id(made.id) is None
+print("  delete  ok")
+
+# A statement that fails is an exception, with the driver's message.
+try:
+    items.update(protopy.sample())  # an id that is not in the table
+except protopy.ProtoError as e:
+    assert "no rows" in str(e), str(e)
+else:
+    raise AssertionError("update of a missing row did not raise")
+try:
+    protopy.Database("postgres://nobody@localhost:1/nowhere")
+except protopy.ProtoError:
+    pass
+else:
+    raise AssertionError("a bad connection did not raise")
+print("  errors  arrive as ProtoError")
 PY
 )
 

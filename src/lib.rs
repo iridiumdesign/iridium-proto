@@ -91,6 +91,7 @@
 //!     target: "dev",
 //!     command: "proto model shop.product".to_string(),
 //!     name_override: None,
+//!     bridge_path: "super::python".to_string(),
 //! };
 //!
 //! print!("{}", render::model::model_file(&model, &opts, None).code);

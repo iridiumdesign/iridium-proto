@@ -126,6 +126,11 @@ pub enum Command {
         /// Table as `schema.table`, or `table` to use the default schema
         table: String,
 
+        /// Also emit the feature-gated Python class, which needs the
+        /// `Database` a schema or database run writes beside the mappers
+        #[arg(long)]
+        pyo3: bool,
+
         /// Write to this file instead of stdout
         #[arg(long, short = 'o', value_name = "FILE")]
         out: Option<PathBuf>,

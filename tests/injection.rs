@@ -82,6 +82,7 @@ fn opts(generate: &Generate, strategy: Strategy) -> Opts<'_> {
         target: "dev",
         command: "proto mapper public.x".to_string(),
         name_override: None,
+        bridge_path: "super::python".to_string(),
     }
 }
 

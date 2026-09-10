@@ -10,20 +10,11 @@ use std::collections::BTreeSet;
 
 use super::children::{self, ChildField};
 use super::plan::{self, Kind, Operation};
-use super::{Opts, Rendered, Strategy, column_list, escape, header, import_block, indent};
+use super::{OWNED, Opts, Rendered, Strategy, column_list, escape, header, import_block, indent};
 use crate::introspect::{Column, Model, Table};
 use crate::naming;
 use crate::quoting;
 use crate::typemap;
-
-/// What closes the doc comment of every method proto generates. These
-/// are the methods [`crate::reconcile`] puts back when the schema moves,
-/// so the file says so where somebody is about to edit one.
-const OWNED: &str = "\
-///
-/// proto owns this method and rewrites it when the schema changes, so
-/// edits here do not survive. Add a method of your own beside it.
-";
 
 /// Once per file, what the per-method notice is contrasting with.
 const YOURS: &str = "\
@@ -95,8 +86,141 @@ impl<'a> {row}Mapper<'a> {{
     ));
     code.push_str(&methods);
     code.push_str("}\n");
+    if opts.pyo3 {
+        code.push_str(&python_block(opts, &ops, &row, &input));
+    }
 
     Rendered { code, warnings }
+}
+
+// ── Python ──────────────────────────────────────────────────────────────────
+
+/// The mapper as a Python class: the same methods, each run to
+/// completion on the runtime the generated `Database` holds, since there
+/// is no `await` on the far side of the crossing.
+///
+/// Everything here is behind the pyo3 feature, and every method carries
+/// the owned notice, so [`crate::reconcile`] treats the block exactly as
+/// it treats the Rust one above it.
+fn python_block(opts: &Opts, ops: &[Operation], row: &str, input: &str) -> String {
+    let feature = &opts.generate.pyo3_feature;
+    let bridge = &opts.bridge_path;
+    let owned = indent(OWNED, 4);
+
+    let mut methods = String::new();
+    for op in ops {
+        methods.push_str(&indent(&python_method(op, opts, row, input), 4));
+    }
+
+    format!(
+        r#"
+// ── Python ──────────────────────────────────────────────────────────
+
+/// `{row}Mapper` for Python: the same methods, each run to completion on
+/// the `Database` it was built with.
+#[cfg(feature = "{feature}")]
+#[pyo3::pyclass(name = "{row}Mapper", frozen)]
+pub struct Py{row}Mapper {{
+    db: pyo3::Py<{bridge}::Database>,
+}}
+
+#[cfg(feature = "{feature}")]
+#[pyo3::pymethods]
+impl Py{row}Mapper {{
+    /// Bind to a database.
+{owned}    #[new]
+    fn new(db: pyo3::Py<{bridge}::Database>) -> Self {{
+        Self {{ db }}
+    }}
+{methods}}}
+"#
+    )
+}
+
+/// One Python method: the Rust method's doc, its arguments as Python
+/// takes them, and the call run on the runtime.
+fn python_method(op: &Operation, opts: &Opts, row: &str, input: &str) -> String {
+    let (params, args) = python_arguments(&op.columns, opts);
+    let bridge = &opts.bridge_path;
+    let method = &op.method;
+    let key = plan::joined(&op.columns, "`, `");
+    let (doc, params, args, ret) = match op.kind {
+        Kind::Insert => (
+            "Insert a row, leaving the database to fill in what it owns.".to_string(),
+            vec![format!("new: pyo3::PyRef<'_, {input}>")],
+            "&new".to_string(),
+            row.to_string(),
+        ),
+        Kind::Update => (
+            format!("Write every column back, addressed by `{key}`. A full replace."),
+            vec![format!("row: pyo3::PyRef<'_, {row}>")],
+            "&row".to_string(),
+            row.to_string(),
+        ),
+        Kind::Delete => (
+            format!("Delete the row identified by `{key}`."),
+            params,
+            args,
+            "()".to_string(),
+        ),
+        Kind::FindOne => (
+            format!("Look up the row identified by `{key}`."),
+            params,
+            args,
+            format!("Option<{row}>"),
+        ),
+        Kind::FindMany => (
+            format!("Every row whose `{key}` matches."),
+            params,
+            args,
+            format!("Vec<{row}>"),
+        ),
+        Kind::List => (
+            "Every row.".to_string(),
+            params,
+            args,
+            format!("Vec<{row}>"),
+        ),
+    };
+    let params: String = params.iter().map(|p| format!(",\n    {p}")).collect();
+    format!(
+        r#"
+/// {doc}
+{OWNED}fn {method}(
+    &self,
+    py: pyo3::Python<'_>{params},
+) -> pyo3::PyResult<{ret}> {{
+    let db = self.db.get();
+    let mapper = {row}Mapper::new(&db.pool);
+    {bridge}::run(db, py, mapper.{method}({args}))
+}}
+"#
+    )
+}
+
+/// Parameters as Python hands them over, and the expressions that pass
+/// them on to the Rust method. A `&str` crosses as itself; a slice
+/// cannot, so Python gives a `Vec` and the call borrows it.
+fn python_arguments(columns: &[&Column], opts: &Opts) -> (Vec<String>, String) {
+    let mut params = Vec::new();
+    let mut args = Vec::new();
+    for column in columns {
+        let name = naming::ident(&column.name);
+        // The Rust signature is the reference; only the slice case differs.
+        let mapped = typemap::map(&column.ty, opts.generate);
+        let rust = param_type(&mapped.text);
+        match rust.strip_prefix("&[").and_then(|t| t.strip_suffix(']')) {
+            Some(inner) => {
+                params.push(format!("{name}: Vec<{inner}>"));
+                args.push(format!("&{name}"));
+            }
+            None => {
+                params.push(format!("{name}: {rust}"));
+                args.push(name);
+            }
+        }
+    }
+    (params, args.join(", "))
 }
 
 fn method(
@@ -680,6 +804,90 @@ mod tests {
                 .count();
             assert!(bare <= 2, "unescaped quote in generated Rust: {line}");
         }
+    }
+
+    fn render_python(strategy: Strategy) -> String {
+        let generate = Generate::default();
+        let mut opts = fixture::opts(&generate, strategy);
+        opts.pyo3 = true;
+        mapper_file(&fixture::product(), &opts).code
+    }
+
+    #[test]
+    fn without_pyo3_nothing_crosses() {
+        assert!(!render(Strategy::Embedded).contains("pyo3"));
+    }
+
+    #[test]
+    fn the_python_class_is_feature_gated_and_stands_on_the_bridge() {
+        let out = render_python(Strategy::Embedded);
+        assert!(
+            out.contains(
+                "#[cfg(feature = \"python\")]\n\
+                 #[pyo3::pyclass(name = \"ProductMapper\", frozen)]\n\
+                 pub struct PyProductMapper {\n    db: pyo3::Py<super::python::Database>,\n}"
+            ),
+            "{out}"
+        );
+        // Each method runs the Rust one on the Database's runtime.
+        assert!(
+            out.contains(
+                "    fn find_by_slug(\n        &self,\n        py: pyo3::Python<'_>,\n        \
+                 slug: &str,\n    ) -> pyo3::PyResult<Option<Product>> {"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("super::python::run(db, py, mapper.find_by_slug(slug))"),
+            "{out}"
+        );
+        assert!(
+            out.contains("super::python::run(db, py, mapper.create(&new))"),
+            "{out}"
+        );
+        assert!(out.contains("new: pyo3::PyRef<'_, NewProduct>,"), "{out}");
+        assert!(syn::parse_file(&out).is_ok(), "{out}");
+    }
+
+    #[test]
+    fn the_python_surface_is_the_same_under_both_strategies() {
+        let python = |code: &str| code[code.find("── Python").unwrap()..].to_string();
+        assert_eq!(
+            python(&render_python(Strategy::Embedded)),
+            python(&render_python(Strategy::Server))
+        );
+    }
+
+    #[test]
+    fn the_python_block_survives_its_own_reconcile() {
+        // Reconcile keys impls by type name and takes back owned methods
+        // the render lacks. `impl PyProductMapper` must be matched against
+        // itself, never against `impl ProductMapper`, or the loaders on
+        // one and the wrappers on the other would take each other back.
+        let out = render_python(Strategy::Embedded);
+        assert_eq!(
+            crate::reconcile::reconcile(&out, &out).as_deref(),
+            Some(out.as_str())
+        );
+        // The Python class wraps the planned operations only: a child
+        // loader is not among them, and nothing removed it.
+        assert!(out.contains("pub async fn load_children"), "{out}");
+        assert!(
+            !out.contains("fn load_children(\n        &self,\n        py"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn every_python_method_says_proto_owns_it() {
+        let out = render_python(Strategy::Embedded);
+        let python = &out[out.find("── Python").unwrap()..];
+        let methods = python.matches("    fn ").count();
+        assert_eq!(
+            python.matches("proto owns this method").count(),
+            methods,
+            "{python}"
+        );
     }
 
     #[test]

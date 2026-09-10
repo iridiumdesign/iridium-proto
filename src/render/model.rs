@@ -6,8 +6,8 @@ use std::collections::BTreeSet;
 use super::Rendered;
 use super::children::{self, ChildField};
 use super::{
-    Opts, dedupe_enums, derive_line, doc_comment, escape, has_serde, header, import_block, indent,
-    reexport_block,
+    OWNED, Opts, dedupe_enums, derive_line, doc_comment, escape, has_serde, header, import_block,
+    indent, reexport_block,
 };
 use crate::introspect::{Column, Model, PgEnum, Table};
 use crate::naming;
@@ -372,9 +372,11 @@ fn enum_block(e: &PgEnum, opts: &Opts, imports: &mut BTreeSet<String>) -> String
 /// insert never supplies them. A column with a literal default is
 /// `Option`, where `None` means "leave it to the default".
 ///
-/// No pyo3 attributes are emitted here. A `#[pyclass]` without a `#[new]`
-/// constructor cannot be built from Python, and writing that constructor
-/// is a judgement call about which columns are required.
+/// Under `--pyo3` the input is a class too, with a constructor: a column
+/// that is `NOT NULL` without a default is a required argument, and the
+/// rest are keyword-only and default to `None`. Without the constructor
+/// a `#[pyclass]` cannot be built from Python, and `create` would have
+/// nothing to take.
 fn input_block(table: &Table, opts: &Opts, imports: &mut BTreeSet<String>) -> String {
     let columns = table.insert_columns();
     if !table.writable() || columns.is_empty() {
@@ -405,10 +407,76 @@ fn input_block(table: &Table, opts: &Opts, imports: &mut BTreeSet<String>) -> St
         ));
     }
 
-    format!(
+    let pyclass = pyclass(opts);
+    let mut out = format!(
         "\n/// Insert input for `{}.{}`. Columns the database fills in on its\n\
-         /// own are absent.\n{derives}pub struct New{name} {{\n{fields}}}\n",
+         /// own are absent.\n{derives}{pyclass}pub struct New{name} {{\n{fields}}}\n",
         table.schema, table.name
+    );
+    if opts.pyo3 {
+        out.push_str(&constructor(&columns, opts, &format!("New{name}")));
+    }
+    out
+}
+
+/// The Python constructor for an input type.
+///
+/// Required columns come first and positional; the rest sit after a
+/// bare `*`, so a caller names them and can leave them out.
+fn constructor(columns: &[&Column], opts: &Opts, name: &str) -> String {
+    let feature = &opts.generate.pyo3_feature;
+    // pyo3 wants the parameters in the order the signature names them,
+    // so the required ones lead on both, and the struct is filled by
+    // name.
+    let mut required = Vec::new();
+    let mut optional = Vec::new();
+    let mut fields = Vec::new();
+    for column in columns {
+        let ident = naming::ident(&column.name);
+        let mapped = typemap::map(&column.ty, opts.generate);
+        let ty = input_type(column, &mapped.text);
+        let param = format!("{ident}: {ty}");
+        if ty.starts_with("Option<") {
+            optional.push((format!("{ident}=None"), param));
+        } else {
+            required.push((ident.clone(), param));
+        }
+        fields.push(ident);
+    }
+    let mut signature: Vec<String> = required.iter().map(|(s, _)| s.clone()).collect();
+    let mut params: Vec<String> = required.into_iter().map(|(_, p)| p).collect();
+    if !optional.is_empty() {
+        signature.push("*".to_string());
+        for (s, p) in optional {
+            signature.push(s);
+            params.push(p);
+        }
+    }
+    let owned = indent(OWNED, 4);
+    format!(
+        r#"
+#[cfg(feature = "{feature}")]
+#[pyo3::pymethods]
+impl {name} {{
+    /// Build an input. Columns that are `NOT NULL` without a default are
+    /// required; the rest are keyword-only and default to `None`, which
+    /// leaves a defaulted column to the database.
+{owned}    #[new]
+    #[pyo3(signature = (
+        {signature},
+    ))]
+    fn new(
+        {params},
+    ) -> Self {{
+        Self {{
+            {fields},
+        }}
+    }}
+}}
+"#,
+        signature = signature.join(",\n        "),
+        params = params.join(",\n        "),
+        fields = fields.join(",\n            "),
     )
 }
 
@@ -445,6 +513,42 @@ mod tests {
         assert!(out.contains("use uuid::Uuid;"), "{out}");
         assert!(out.contains(MARKER), "{out}");
         assert!(!out.contains("pyo3"), "{out}");
+    }
+
+    #[test]
+    fn the_input_gets_a_constructor_under_pyo3() {
+        let out = render(true).code;
+        // Required first, then keyword-only with None defaults: slug, name
+        // and org_id have no default; status has a literal one, and
+        // price is nullable.
+        assert!(
+            out.contains(
+                "    #[pyo3(signature = (\n        slug,\n        name,\n        org_id,\n        \
+                 *,\n        status=None,\n        price=None,\n    ))]"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("#[cfg(feature = \"python\")]\n#[pyo3::pymethods]\nimpl NewProduct {"),
+            "{out}"
+        );
+        assert!(
+            out.contains("pyo3::pyclass(get_all, set_all))]\npub struct NewProduct {"),
+            "{out}"
+        );
+        assert!(out.contains("proto owns this method"), "{out}");
+        // And without the flag, the input is a plain struct.
+        let plain = render(false).code;
+        assert!(!plain.contains("impl NewProduct"), "{plain}");
+    }
+
+    #[test]
+    fn the_constructor_survives_its_own_reconcile() {
+        let out = render(true).code;
+        assert_eq!(
+            crate::reconcile::reconcile(&out, &out).as_deref(),
+            Some(out.as_str())
+        );
     }
 
     #[test]
