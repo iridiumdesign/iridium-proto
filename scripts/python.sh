@@ -78,7 +78,8 @@ CREATE TABLE $SCHEMA.item (
     price      numeric(10,2),
     tags       text[],
     count      integer NOT NULL DEFAULT 0,
-    created_at timestamptz NOT NULL DEFAULT now()
+    created_at timestamptz NOT NULL DEFAULT now(),
+    parent_id  uuid REFERENCES $SCHEMA.item(id)
 );
 SQL
 
@@ -147,6 +148,8 @@ fn sample() -> Item {
         tags: Some(vec!["a".to_string(), "b".to_string()]),
         count: 7,
         created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+        parent_id: None,
+        children: Vec::new(),
     }
 }
 
@@ -201,6 +204,9 @@ assert isinstance(it.tags, list), type(it.tags)
 assert isinstance(it.count, int), type(it.count)
 assert isinstance(it.created_at, datetime.datetime), type(it.created_at)
 assert it.created_at.tzinfo is not None, "timestamptz must stay aware"
+# The parent's side of the tree crosses as a list of the same class.
+assert it.parent_id is None
+assert it.children == [], it.children
 print("  reads   ok")
 
 # set_all has to work, and has to round trip.
@@ -216,6 +222,11 @@ assert it.price == decimal.Decimal("1.50")
 assert it.tags == ["x"]
 assert it.status == protopy.ItemStatus.Retired
 assert it.id == uuid.UUID("11111111-1111-1111-1111-111111111111")
+child = protopy.sample()
+child.parent_id = it.id
+it.children = [child]
+assert len(it.children) == 1 and it.children[0].slug == "widget"
+assert it.children[0].parent_id == it.id
 print("  writes  ok")
 
 # A nullable column takes None; the enum compares by identity and by int,

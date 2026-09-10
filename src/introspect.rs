@@ -138,6 +138,9 @@ pub struct Table {
     pub unique_keys: Vec<Vec<String>>,
     /// Foreign key constraints, in constraint order.
     pub foreign_keys: Vec<ForeignKey>,
+    /// Tables whose single-column foreign keys point here, in constraint
+    /// order. The parent's side of the relationship.
+    pub children: Vec<Child>,
 }
 
 /// A foreign key constraint. Single-column ones become finders.
@@ -149,6 +152,21 @@ pub struct ForeignKey {
     pub ref_schema: String,
     /// The referenced relation.
     pub ref_table: String,
+}
+
+/// A table that refers to this one through a single-column foreign key.
+/// One-to-one links — where the referring column is itself unique — are
+/// not here: they are not a collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Child {
+    /// Schema of the referring table.
+    pub schema: String,
+    /// The referring table.
+    pub table: String,
+    /// Its foreign key column.
+    pub column: String,
+    /// The column here that it refers to — the primary key, nearly always.
+    pub ref_column: String,
 }
 
 impl Table {
@@ -301,6 +319,34 @@ SELECT array_agg(a.attname::text ORDER BY k.ord) AS cols,
  GROUP BY c.oid, rn.nspname, rt.relname
  ORDER BY c.oid";
 
+// The other side of FOREIGN_KEY_SQL: every single-column foreign key
+// that points at this table. A referring column that is itself unique
+// makes a one-to-one, which is not a collection, so it is left out.
+const CHILDREN_SQL: &str = "\
+SELECT n.nspname::text  AS schema,
+       t.relname::text  AS table,
+       a.attname::text  AS column,
+       ra.attname::text AS ref_column
+  FROM pg_constraint c
+  JOIN pg_class t       ON t.oid = c.conrelid
+  JOIN pg_namespace n   ON n.oid = t.relnamespace
+  JOIN pg_class rt      ON rt.oid = c.confrelid
+  JOIN pg_namespace rn  ON rn.oid = rt.relnamespace
+  JOIN pg_attribute a   ON a.attrelid = t.oid AND a.attnum = c.conkey[1]
+  JOIN pg_attribute ra  ON ra.attrelid = rt.oid AND ra.attnum = c.confkey[1]
+ WHERE rn.nspname = $1
+   AND rt.relname = $2
+   AND c.contype = 'f'
+   AND array_length(c.conkey, 1) = 1
+   AND NOT EXISTS (
+       SELECT 1 FROM pg_index i
+        WHERE i.indrelid = t.oid
+          AND i.indisunique
+          AND i.indpred IS NULL
+          AND i.indexprs IS NULL
+          AND i.indkey::int2[] = c.conkey)
+ ORDER BY c.oid";
+
 const ENUM_SQL: &str = "\
 SELECT e.enumlabel::text AS label
   FROM pg_enum e
@@ -365,7 +411,8 @@ async fn schema_exists(pool: &PgPool, schema: &str) -> Result<bool> {
 }
 
 /// Read one relation: its columns, comments, key, unique keys, foreign
-/// keys, and the enum types its columns use.
+/// keys, the tables whose foreign keys point at it, and the enum types
+/// its columns use.
 ///
 /// # Errors
 ///
@@ -427,6 +474,12 @@ pub async fn model(pool: &PgPool, schema: &str, table: &str) -> Result<Model> {
         .fetch_all(pool)
         .await?;
 
+    let children = sqlx::query(CHILDREN_SQL)
+        .bind(schema)
+        .bind(table)
+        .fetch_all(pool)
+        .await?;
+
     let table = Table {
         schema: schema.to_string(),
         name: table.to_string(),
@@ -444,6 +497,15 @@ pub async fn model(pool: &PgPool, schema: &str, table: &str) -> Result<Model> {
                 columns: r.get("cols"),
                 ref_schema: r.get("ref_schema"),
                 ref_table: r.get("ref_table"),
+            })
+            .collect(),
+        children: children
+            .iter()
+            .map(|r| Child {
+                schema: r.get("schema"),
+                table: r.get("table"),
+                column: r.get("column"),
+                ref_column: r.get("ref_column"),
             })
             .collect(),
     };

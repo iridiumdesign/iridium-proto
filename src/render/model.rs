@@ -4,6 +4,7 @@
 use std::collections::BTreeSet;
 
 use super::Rendered;
+use super::children::{self, ChildField};
 use super::{
     Opts, dedupe_enums, derive_line, doc_comment, escape, has_serde, header, import_block, indent,
     reexport_block,
@@ -43,9 +44,12 @@ pub fn model_file(model: &Model, opts: &Opts, enum_path: Option<&str>) -> Render
         }
     }
 
+    // A child's type lives in the sibling module `--out-dir` writes it
+    // to, which is also where a single `proto model` run assumes it is.
     body.push_str(&struct_block(
         &model.table,
         opts,
+        Some("super"),
         &mut imports,
         &mut warnings,
     ));
@@ -77,9 +81,11 @@ pub fn schema_file(models: &[Model], schema: &str, opts: &Opts) -> Rendered {
         body.push('\n');
     }
     for model in models {
+        // Every struct is in this one file, so a child needs no import.
         body.push_str(&struct_block(
             &model.table,
             opts,
+            None,
             &mut imports,
             &mut warnings,
         ));
@@ -203,9 +209,13 @@ fn pyclass(opts: &Opts) -> String {
     format!("#[cfg_attr(feature = \"{feature}\", pyo3::pyclass(get_all, set_all))]\n")
 }
 
+/// The row struct. `sibling` is the module path a child's type is
+/// imported from — `super` beside the other model files — or `None`
+/// when the child is in this file too.
 fn struct_block(
     table: &Table,
     opts: &Opts,
+    sibling: Option<&str>,
     imports: &mut BTreeSet<String>,
     warnings: &mut Vec<String>,
 ) -> String {
@@ -253,7 +263,44 @@ fn struct_block(
         ));
     }
 
+    for child in children::of(table, opts.generate) {
+        if let Some(path) = sibling
+            && !child.is_self(table)
+        {
+            imports.insert(format!("{path}::{}::{}", child.module, child.ty));
+        }
+        fields.push_str(&indent(&child_field(&child, table, &name, opts), 4));
+    }
+
     format!("{docs}{derives}{pyclass}pub struct {name} {{\n{fields}}}\n")
+}
+
+/// The field a parent holds its child rows in. Not a column, so sqlx is
+/// told to skip it and serde to default it; the mapper fills it.
+fn child_field(child: &ChildField, table: &Table, parent: &str, opts: &Opts) -> String {
+    let derives = &opts.generate.derives;
+    let ty = if child.is_self(table) {
+        parent.to_string()
+    } else {
+        child.ty.clone()
+    };
+    let mut out = format!(
+        "/// Rows of `{}.{}` whose `{}` is this row's `{}`. Not a column:\n\
+         /// `{parent}Mapper::load_{}` fills it, and it is empty until then.\n",
+        child.child.schema,
+        child.child.table,
+        child.child.column,
+        child.child.ref_column,
+        child.stem
+    );
+    if derives.iter().any(|d| d == "sqlx::FromRow") {
+        out.push_str("#[sqlx(skip)]\n");
+    }
+    if has_serde(derives) {
+        out.push_str("#[serde(default)]\n");
+    }
+    out.push_str(&format!("pub {}: Vec<{ty}>,\n", child.field));
+    out
 }
 
 fn enum_block(e: &PgEnum, opts: &Opts, imports: &mut BTreeSet<String>) -> String {
@@ -408,6 +455,42 @@ mod tests {
         // A field-level cfg_attr would not compile: pyclass runs before
         // cfg_attr expands, so the `pyo3` field attribute is left orphaned.
         assert!(!out.contains("pyo3(get, set)"), "{out}");
+    }
+
+    #[test]
+    fn a_parent_holds_its_children_beside_its_columns() {
+        let out = render(false).code;
+        assert!(out.contains("use super::variant::Variant;"), "{out}");
+        assert!(
+            out.contains(
+                "    #[sqlx(skip)]\n    #[serde(default)]\n    pub children: Vec<Variant>,\n"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("`ProductMapper::load_children` fills it"),
+            "{out}"
+        );
+        // Not a column, so the insert input does not carry it.
+        let input = &out[out.find("pub struct NewProduct").unwrap()..];
+        assert!(!input.contains("children"), "{input}");
+
+        // In one flat file the child is right there: nothing to import.
+        let generate = Generate::default();
+        let opts = fixture::opts(&generate, Strategy::Embedded);
+        let flat = schema_file(&[fixture::product()], "shop", &opts).code;
+        assert!(!flat.contains("use super::variant"), "{flat}");
+        assert!(flat.contains("pub children: Vec<Variant>,"), "{flat}");
+    }
+
+    #[test]
+    fn a_tree_holds_its_own_kind() {
+        let generate = Generate::default();
+        let opts = fixture::opts(&generate, Strategy::Embedded);
+        let out = model_file(&fixture::category(), &opts, None).code;
+        assert!(out.contains("pub children: Vec<Category>,"), "{out}");
+        assert!(!out.contains("use super::category"), "{out}");
+        assert!(syn::parse_file(&out).is_ok(), "{out}");
     }
 
     #[test]

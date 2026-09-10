@@ -56,7 +56,15 @@ pub fn reconcile(existing: &str, rendered: &str) -> Option<String> {
             // Already here, in some form: correct it in place.
             Some(have) => match (have, want) {
                 (syn::Item::Struct(have), syn::Item::Struct(want)) => {
-                    fields(have, want, &offsets, existing, &mut edits);
+                    fields(
+                        have,
+                        want,
+                        &offsets,
+                        existing,
+                        rendered,
+                        &rendered_offsets,
+                        &mut edits,
+                    );
                 }
                 (syn::Item::Impl(have), syn::Item::Impl(want)) => {
                     methods(
@@ -99,11 +107,14 @@ pub fn reconcile(existing: &str, rendered: &str) -> Option<String> {
 }
 
 /// Reconcile one struct's fields: fix a type, add a column, drop one.
+#[allow(clippy::too_many_arguments)]
 fn fields(
     have: &syn::ItemStruct,
     want: &syn::ItemStruct,
     offsets: &Offsets,
     source: &str,
+    rendered: &str,
+    rendered_offsets: &Offsets,
     edits: &mut Vec<Edit>,
 ) {
     let name_of = |f: &syn::Field| {
@@ -186,11 +197,19 @@ fn fields(
             },
         };
 
-        additions.entry(at).or_default().push(format!(
-            "\n{indent}pub {}: {},",
-            field.ident.as_ref().unwrap(),
-            type_text(&field.ty)
-        ));
+        // The field as rendered, attributes and doc comment included: a
+        // `#[sqlx(rename)]` or `#[sqlx(skip)]` is part of what makes the
+        // field decode, not decoration. Re-indented to where it lands.
+        let text = &rendered
+            [rendered_offsets.of(field.span().start())..rendered_offsets.of(field.span().end())];
+        let lines: Vec<String> = text
+            .lines()
+            .map(|line| format!("\n{indent}{}", line.trim_start()))
+            .collect();
+        additions
+            .entry(at)
+            .or_default()
+            .push(format!("{},", lines.concat()));
     }
 
     for (at, lines) in additions {
@@ -508,6 +527,28 @@ pub struct Item {
         assert!(out.contains("// Prices are ex-VAT"), "{out}");
         assert!(out.contains("pub fn dear(&self) -> bool {"), "{out}");
         // Still parses as Rust, which is the only test that counts.
+        assert!(syn::parse_file(&out).is_ok(), "{out}");
+    }
+
+    /// A field that is not a column only decodes because of what is
+    /// written above it, so a new one arrives with its attributes and
+    /// its doc comment, not just its declaration.
+    #[test]
+    fn a_new_field_arrives_with_its_attributes() {
+        let with_children = CORRECT.replace(
+            "    pub tags: Option<Vec<String>>,",
+            "    pub tags: Option<Vec<String>>,\n    /// Rows of `shop.variant`.\n    \
+             #[sqlx(skip)]\n    #[serde(default)]\n    pub children: Vec<Variant>,",
+        );
+        let out = reconcile(LIVED_IN, &with_children).expect("both parse");
+        assert!(
+            out.contains(
+                "    /// Rows of `shop.variant`.\n    #[sqlx(skip)]\n    #[serde(default)]\n    \
+                 pub children: Vec<Variant>,\n"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("// The tags come from the importer"), "{out}");
         assert!(syn::parse_file(&out).is_ok(), "{out}");
     }
 

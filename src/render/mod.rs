@@ -4,6 +4,8 @@
 //!
 //! - [`model`] writes the row structs, their enum types, and the insert
 //!   input types.
+//! - [`children`] names the field a parent holds its child rows in, so
+//!   the struct and the mapper method that fills it agree.
 //! - [`mapper`] writes the repository struct that runs the queries.
 //! - [`sql`] writes the migration defining the server-side functions the
 //!   `Server` strategy calls.
@@ -13,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::config::Generate;
 use crate::introspect::{Model, PgEnum};
 
+pub mod children;
 #[cfg(test)]
 pub(crate) mod fixture;
 pub mod mapper;

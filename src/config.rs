@@ -98,6 +98,33 @@ pub struct Generate {
     /// Add the dependencies the output needs to the nearest `Cargo.toml`
     /// above where it is written. `--no-manifest` beats it for a run.
     pub manifest: bool,
+    /// The field a parent struct holds its child rows in, when exactly
+    /// one table refers to it. With several, each field is named after
+    /// its child table. Empty means no children fields at all.
+    pub children_field: String,
+    /// Per-parent overrides, keyed `schema.table` or `table`.
+    pub relations: HashMap<String, Relation>,
+}
+
+/// What `[generate.relations."schema.table"]` can say about a parent.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Relation {
+    /// The children field: `children = "variants"` for a parent with one
+    /// child table, or `children = { variant = "variants", .. }` naming
+    /// each child table (or `table.column`) for one with several.
+    pub children: Option<ChildrenName>,
+}
+
+/// One name, or one per child table.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ChildrenName {
+    /// The single child table's field.
+    One(String),
+    /// Field name by child table, as `table`, `schema.table`,
+    /// `table.column` or `schema.table.column`.
+    Each(HashMap<String, String>),
 }
 
 impl Default for Generate {
@@ -140,6 +167,8 @@ impl Default for Generate {
             migration_name: crate::output::DEFAULT_MIGRATION_NAME.to_string(),
             migration_tag: None,
             manifest: true,
+            children_field: "children".to_string(),
+            relations: HashMap::new(),
         }
     }
 }

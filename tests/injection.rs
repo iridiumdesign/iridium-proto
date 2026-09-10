@@ -66,6 +66,7 @@ fn hostile() -> Model {
                 ref_schema: "public".into(),
                 ref_table: "other".into(),
             }],
+            children: Vec::new(),
         },
         enums: Vec::new(),
     }

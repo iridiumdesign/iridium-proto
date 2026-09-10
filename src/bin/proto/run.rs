@@ -696,6 +696,14 @@ fn show_config(path: &Path, file: Option<&Config>) -> Result<()> {
                     "left alone"
                 }
             );
+            println!(
+                "  children field: {}",
+                if g.children_field.is_empty() {
+                    "(off)"
+                } else {
+                    &g.children_field
+                }
+            );
             if !g.types.is_empty() {
                 let mut keys: Vec<&String> = g.types.keys().collect();
                 keys.sort();
