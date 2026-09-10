@@ -95,6 +95,9 @@ pub struct Generate {
     /// What `{tag}` in `migration_name` says. `--migration-tag` beats it
     /// for a run.
     pub migration_tag: Option<String>,
+    /// Add the dependencies the output needs to the nearest `Cargo.toml`
+    /// above where it is written. `--no-manifest` beats it for a run.
+    pub manifest: bool,
 }
 
 impl Default for Generate {
@@ -136,6 +139,7 @@ impl Default for Generate {
             migrations_dir: None,
             migration_name: crate::output::DEFAULT_MIGRATION_NAME.to_string(),
             migration_tag: None,
+            manifest: true,
         }
     }
 }

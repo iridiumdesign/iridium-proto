@@ -34,6 +34,12 @@ default_schema = "public"
 exclude_tables = ["_sqlx_migrations"]
 exclude_schemas = ["information_schema", "pg_catalog", "pg_toast"]
 
+# Add the dependencies the generated code needs — sqlx, serde, uuid and
+# the rest, only those a run used — to the nearest Cargo.toml above the
+# output. What is already declared is left alone. --no-manifest beats
+# this for a run.
+# manifest = true
+
 # Where `--sql server` writes its migrations, and what it calls them.
 # --migrations-dir beats the directory for a run. The name is a pattern:
 # {version} is YYYYMMDDNNN, {date} and {seq} are its halves, {slug} is

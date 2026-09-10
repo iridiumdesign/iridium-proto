@@ -112,6 +112,7 @@ pub mod config;
 pub mod error;
 pub mod inspect;
 pub mod introspect;
+pub mod manifest;
 pub mod naming;
 pub mod output;
 pub mod quoting;
