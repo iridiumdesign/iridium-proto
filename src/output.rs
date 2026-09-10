@@ -651,6 +651,18 @@ impl Journal {
         Ok(true)
     }
 
+    /// Record an outcome for a file corrected by other means than a
+    /// rendered rewrite — the manifest, which is patched rather than
+    /// reconciled. Nothing is written here: the caller has done that,
+    /// or in check mode has not.
+    pub fn record(&mut self, change: Change, path: &Path, detail: Option<String>) {
+        self.entries.push(Entry {
+            change,
+            path: path.to_path_buf(),
+            detail,
+        });
+    }
+
     /// Whether anything moved, which is what `--check` exits on.
     pub fn changed(&self) -> bool {
         self.entries.iter().any(|e| e.change.is_change())

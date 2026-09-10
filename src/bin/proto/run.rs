@@ -12,6 +12,7 @@ use sqlx::postgres::PgPoolOptions;
 use iridium_proto::config::{self, Config, Generate, Target};
 use iridium_proto::error::{Error, Result};
 use iridium_proto::introspect::{self, Model};
+use iridium_proto::manifest;
 use iridium_proto::naming;
 use iridium_proto::output::{self, Journal, Migration};
 use iridium_proto::render::python::Group;
@@ -71,7 +72,11 @@ async fn run(
                 render::model::model_file(&model, &opts, None),
                 out.as_deref(),
                 *force,
-            )
+            )?;
+            if let Some(path) = out {
+                sync_manifest(cli, journal, [&model], &opts, path)?;
+            }
+            Ok(())
         }
 
         Command::Mapper {
@@ -98,7 +103,11 @@ async fn run(
                 render::mapper::mapper_file(&model, &opts),
                 out.as_deref(),
                 *force,
-            )
+            )?;
+            if let Some(path) = out {
+                sync_manifest(cli, journal, [&model], &opts, path)?;
+            }
+            Ok(())
         }
 
         Command::Schema {
@@ -131,7 +140,8 @@ async fn run(
                     write_schema(
                         journal, &models, schema, &opts, dir, mappers, feature, *prune, *no_mod,
                         *force,
-                    )
+                    )?;
+                    sync_manifest(cli, journal, &models, &opts, dir)
                 }
                 None if *mappers => Err(Error::Usage(
                     "--mappers needs --out-dir and --mapper-dir".to_string(),
@@ -215,7 +225,8 @@ async fn run(
                     journal.write(&dir.join("mod.rs"), &code, *force)?;
                 }
             }
-            Ok(())
+            let models = groups.iter().flat_map(|(_, _, models)| models);
+            sync_manifest(cli, journal, models, &opts, out_dir)
         }
 
         Command::List { schema } => match schema {
@@ -498,6 +509,22 @@ fn write_schema(
     Ok(())
 }
 
+/// Add what the output for `models` needs to the nearest `Cargo.toml`
+/// above `from`, unless the flag or the config says to leave it alone.
+fn sync_manifest<'a>(
+    cli: &Cli,
+    journal: &mut Journal,
+    models: impl IntoIterator<Item = &'a Model>,
+    opts: &Opts,
+    from: &Path,
+) -> Result<()> {
+    if cli.no_manifest || !opts.generate.manifest {
+        return Ok(());
+    }
+    let requirements = manifest::requirements(models, opts);
+    manifest::sync(journal, from, &requirements)
+}
+
 /// Remove generated files in `dir` that are not in `kept`.
 ///
 /// Only files carrying the generated marker are touched, so a directory
@@ -661,6 +688,14 @@ fn show_config(path: &Path, file: Option<&Config>) -> Result<()> {
             if let Some(tag) = &g.migration_tag {
                 println!("  migration tag:  {tag}");
             }
+            println!(
+                "  manifest:       {}",
+                if g.manifest {
+                    "add missing dependencies"
+                } else {
+                    "left alone"
+                }
+            );
             if !g.types.is_empty() {
                 let mut keys: Vec<&String> = g.types.keys().collect();
                 keys.sort();

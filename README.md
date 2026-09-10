@@ -206,6 +206,7 @@ proto config                 Show the resolved config
 | `--name <name>` | single | Struct name, overriding the derived one |
 | `--no-mod` | bulk | Skip the generated `mod.rs` |
 | `--force` | writers | Overwrite a file `proto` did not generate |
+| `--no-manifest` | writers | Leave `Cargo.toml` alone |
 
 `proto schema` without `--out-dir` writes one flat stream: the schema's
 enum types once, then a struct per table. With `--out-dir` it writes
@@ -464,6 +465,40 @@ warnings whatever the schema looks like. Two columns that reduce to one
 field name is the exception: that would not compile, so it is reported
 on stderr rather than emitted quietly.
 
+## Dependencies
+
+The generated code names `sqlx`, `serde`, `uuid`, `chrono` and the rest
+by full path, so the crate it lands in has to declare them. When the
+output is written into a Cargo project — `--out` or `--out-dir` —
+`proto` finds the nearest `Cargo.toml` above it and adds what is
+missing, with the version and features the output is written against:
+
+```
+$ proto schema shop --out-dir src/model
+  created src/model/product.rs
+  updated Cargo.toml
+      +chrono, +rust_decimal, +serde, +sqlx, +uuid
+1 created, 1 updated
+```
+
+Only what a run actually used is added: a schema with no `numeric`
+column pulls in no `rust_decimal`. A dependency already declared is
+left exactly as it is, whatever its version or features. Where it lacks
+a feature the output needs — `sqlx` without `uuid`, say — `proto` says
+so on stderr rather than editing your line. Comments and ordering
+elsewhere in the file survive; the manifest is patched, not reprinted.
+
+`--pyo3` adds `pyo3` as an optional dependency and the feature that
+turns it on, listing the conversions the columns need (see
+[pyo3](#pyo3)). A crate that inherits from `[workspace.dependencies]`
+gets a `workspace = true` entry instead of a version.
+
+`--check` counts a missing dependency as drift, the same as a missing
+column. Output to stdout touches no manifest. `--no-manifest`, or
+`manifest = false` under `[generate]`, turns the whole thing off. A
+type from `[generate.types]` names a crate `proto` knows no version
+for, so a missing one is reported, not added.
+
 ## Keeping in step with the schema
 
 A database moves. Regenerating is safe to do on a habit rather than a
@@ -684,6 +719,11 @@ checksummed and must not be edited, so regenerating a table whose CRUD
 has not changed leaves its migration alone instead of writing a second
 one that says the same thing.
 
+**The manifest is only added to.** `Cargo.toml` gets the dependencies
+the output needs and nothing it already has is edited — not a version,
+not a feature list. The file is patched in place, so comments and
+ordering stay where they are. `--no-manifest` leaves it alone entirely.
+
 ### What it does not protect you from
 
 **The database you point it at is trusted.** `proto` reads identifiers,
@@ -734,7 +774,9 @@ and writing that constructor is a judgment call about which columns are
 required.
 
 The consuming crate declares the feature and the pyo3 conversions its
-column types need:
+column types need. `proto` writes both into `Cargo.toml` when the
+output lands in a crate (see [Dependencies](#dependencies)); by hand,
+it is:
 
 ```toml
 [features]

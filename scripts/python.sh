@@ -84,10 +84,10 @@ SQL
 
 say "generating models with --pyo3 and a #[pymodule]"
 mkdir -p "$WORK/src/model" "$WORK/.cargo"
-"$PROTO" --db "$TARGET" schema "$SCHEMA" --pyo3 --pymodule protopy \
-    --out-dir "$WORK/src/model"
-
-say "building an extension module from them"
+# An extension crate declares pyo3 itself, not optional, because the
+# whole crate is the extension. proto sees that and writes a feature
+# that lists the conversions only, with no `dep:pyo3`. Everything else
+# the generated code needs, it adds.
 cat > "$WORK/Cargo.toml" <<'TOML'
 [package]
 name = "protopy"
@@ -98,19 +98,19 @@ edition = "2024"
 name = "protopy_test"
 crate-type = ["cdylib"]
 
-[features]
-python = ["pyo3/chrono", "pyo3/uuid", "pyo3/rust_decimal"]
-
 [dependencies]
-chrono = { version = "0.4", features = ["serde"] }
 pyo3 = { version = "0.26", features = ["extension-module"] }
-rust_decimal = { version = "1", features = ["serde"] }
-serde = { version = "1", features = ["derive"] }
-sqlx = { version = "0.8", features = [
-    "runtime-tokio", "postgres", "chrono", "uuid", "rust_decimal",
-] }
-uuid = { version = "1", features = ["serde"] }
 TOML
+"$PROTO" --db "$TARGET" schema "$SCHEMA" --pyo3 --pymodule protopy \
+    --out-dir "$WORK/src/model"
+grep -qF 'python = ["pyo3/chrono", "pyo3/uuid", "pyo3/rust_decimal"]' \
+    "$WORK/Cargo.toml" || {
+    echo "  proto did not write the conversions-only feature" >&2
+    cat "$WORK/Cargo.toml" >&2
+    exit 1
+}
+
+say "building an extension module from them"
 
 # An extension module leaves libpython to the interpreter that loads it.
 # Linux resolves that by default; macOS has to be told.

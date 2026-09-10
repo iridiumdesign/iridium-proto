@@ -42,6 +42,19 @@ pub enum Error {
         source: toml::de::Error,
     },
 
+    /// The consuming crate's `Cargo.toml` is not valid TOML, so there is
+    /// nothing to add a dependency to.
+    #[error("could not parse {path}: {source}")]
+    ParseManifest {
+        /// The manifest in question.
+        path: PathBuf,
+        /// What the TOML parser objected to. Boxed: the parser keeps
+        /// the input around, and this is the one variant that would
+        /// otherwise make every `Result` in the crate bigger.
+        #[source]
+        source: Box<toml_edit::TomlError>,
+    },
+
     /// No config file, and no connection string to fall back on.
     #[error("no config file found at {path}\n  create it, set PROTO_CONFIG, or pass --url")]
     NoConfig {

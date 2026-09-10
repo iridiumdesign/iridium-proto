@@ -124,7 +124,7 @@ fn derive_line(derives: &[String], imports: &mut BTreeSet<String>) -> String {
     format!("#[derive({})]\n", derives.join(", "))
 }
 
-fn has_serde(derives: &[String]) -> bool {
+pub(crate) fn has_serde(derives: &[String]) -> bool {
     derives
         .iter()
         .any(|d| d == "Serialize" || d == "Deserialize")

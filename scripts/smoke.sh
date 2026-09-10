@@ -116,6 +116,21 @@ SQL
 
 mkdir -p "$WORK/src/model" "$WORK/src/mapper" "$WORK/migrations"
 
+# The crate starts with only what its own code needs. Everything the
+# generated code needs — sqlx, serde, the type crates, pyo3 and the
+# feature that turns it on — proto adds itself, and `cargo check` below
+# is what proves it added the right ones.
+cat > "$WORK/Cargo.toml" <<'TOML'
+[package]
+name = "proto-smoke"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+# Ours: the decode binary is a tokio main.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+TOML
+
 say "generating models, mappers and functions"
 # Both strategies, side by side. They emit the same API, so the same
 # round trip runs through each and neither can rot unnoticed.
@@ -125,28 +140,30 @@ say "generating models, mappers and functions"
     schema "$SCHEMA" --pyo3 --mappers \
     --out-dir "$WORK/src/model" --mapper-dir "$WORK/src/mapper_server"
 
+say "checking proto filled in the manifest"
+for needed in 'sqlx = {' 'serde = {' 'uuid = {' 'chrono = {' \
+    'pyo3 = { version = "0.26", optional = true }' \
+    'python = ["dep:pyo3", "pyo3/chrono", "pyo3/uuid", "pyo3/rust_decimal"]'; do
+    grep -qF "$needed" "$WORK/Cargo.toml" || {
+        echo "  Cargo.toml is missing: $needed" >&2
+        cat "$WORK/Cargo.toml" >&2
+        exit 1
+    }
+done
+grep -q '^# Ours: the decode binary' "$WORK/Cargo.toml" || {
+    echo "  Cargo.toml lost a comment proto should have left alone" >&2
+    exit 1
+}
+# A rerun over a complete manifest adds nothing and says so.
+"$PROTO" --db "$TARGET" schema "$SCHEMA" --pyo3 --mappers \
+    --out-dir "$WORK/src/model" --mapper-dir "$WORK/src/mapper" \
+    --check >"$WORK/manifest.log" 2>&1 || {
+    echo "  --check found drift right after generating" >&2
+    cat "$WORK/manifest.log" >&2
+    exit 1
+}
+
 say "compiling the generated crate, and linting it as hard as this one"
-cat > "$WORK/Cargo.toml" <<'TOML'
-[package]
-name = "proto-smoke"
-version = "0.0.0"
-edition = "2024"
-
-[features]
-python = ["dep:pyo3", "pyo3/chrono", "pyo3/uuid", "pyo3/rust_decimal"]
-
-[dependencies]
-chrono = { version = "0.4", features = ["serde"] }
-pyo3 = { version = "0.26", optional = true }
-rust_decimal = { version = "1", features = ["serde"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sqlx = { version = "0.8", features = [
-    "runtime-tokio", "postgres", "chrono", "uuid", "rust_decimal", "json",
-] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-uuid = { version = "1", features = ["serde"] }
-TOML
 printf 'pub mod mapper;\npub mod mapper_server;\npub mod model;\n' > "$WORK/src/lib.rs"
 # Generated code is held to the same bar as the code that writes it:
 # whatever proto emits has to survive `-D warnings` in someone else's

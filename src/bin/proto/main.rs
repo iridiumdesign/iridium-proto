@@ -61,6 +61,11 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "TAG")]
     migration_tag: Option<String>,
 
+    /// Leave the nearest Cargo.toml alone rather than adding the
+    /// dependencies the output needs; overrides `manifest` in the config
+    #[arg(long, global = true)]
+    no_manifest: bool,
+
     /// Write nothing; report what regenerating would change and exit
     /// non-zero if anything would. For asking whether a tree has fallen
     /// behind its database
