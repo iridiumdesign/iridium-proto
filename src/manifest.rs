@@ -77,7 +77,9 @@ const KNOWN: [&str; 4] = ["chrono", "uuid", "rust_decimal", "serde_json"];
 /// Only what a run actually used is required: a schema with no `numeric`
 /// column needs no `rust_decimal`. `sqlx` is always there — the row
 /// structs derive from it and the mappers run on it — with the features
-/// for whichever of its type integrations the columns use.
+/// for whichever of its type integrations the columns use. A composite's
+/// attributes count as columns here: the generated struct names their
+/// types just as a row struct does.
 ///
 /// # Examples
 ///
@@ -115,6 +117,7 @@ const KNOWN: [&str; 4] = ["chrono", "uuid", "rust_decimal", "serde_json"];
 ///             default_expr: None,
 ///             identity: false,
 ///             generated: false,
+///             extension: None,
 ///         }],
 ///         primary_key: vec!["id".into()],
 ///         unique_keys: vec![],
@@ -122,6 +125,7 @@ const KNOWN: [&str; 4] = ["chrono", "uuid", "rust_decimal", "serde_json"];
 ///         children: vec![],
 ///     },
 ///     enums: vec![],
+///     composites: vec![],
 /// };
 ///
 /// let reqs = requirements([&model], &opts, false);
@@ -141,10 +145,13 @@ pub fn requirements<'a>(
     let mut roots = BTreeSet::new();
     let mut foreign = BTreeSet::new();
     let mut enums = false;
+    let mut composites = false;
 
     for model in models {
         enums |= !model.enums.is_empty();
-        for column in &model.table.columns {
+        composites |= !model.composites.is_empty();
+        let attributes = model.composites.iter().flat_map(|c| &c.fields);
+        for column in model.table.columns.iter().chain(attributes) {
             let mapped = typemap::map(&column.ty, generate);
             for import in &mapped.imports {
                 let root = import.split("::").next().unwrap_or(import);
@@ -163,6 +170,7 @@ pub fn requirements<'a>(
 
     let serde = has_serde(&generate.derives)
         || (enums && has_serde(&generate.enum_derives))
+        || (composites && has_serde(&generate.composite_derives))
         || (opts.inputs && has_serde(&generate.input_derives));
     let with_serde: &[&str] = if serde { &["serde"] } else { &[] };
 
@@ -564,6 +572,25 @@ mod tests {
         );
         assert!(reqs.feature.is_none());
         assert!(reqs.foreign.is_empty());
+    }
+
+    #[test]
+    fn a_composites_attributes_count_as_columns() {
+        // `sized_product` nests `span`, whose attributes are numeric. Take
+        // numeric off the table itself and the composite alone must still
+        // pull in rust_decimal, and the sqlx feature that decodes it.
+        let generate = Generate::default();
+        let opts = fixture::opts(&generate, Strategy::Embedded);
+        let mut model = fixture::sized_product();
+        model.table.columns.retain(|c| c.name != "price");
+        let reqs = requirements([&model], &opts, false);
+        assert!(names(&reqs).contains(&"rust_decimal"), "{:?}", names(&reqs));
+        assert!(
+            dependency(&reqs, "sqlx")
+                .features
+                .iter()
+                .any(|f| f == "rust_decimal")
+        );
     }
 
     #[test]

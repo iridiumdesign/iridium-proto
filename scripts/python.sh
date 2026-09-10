@@ -72,6 +72,7 @@ psql -q -v ON_ERROR_STOP=1 <<SQL
 DROP SCHEMA IF EXISTS $SCHEMA CASCADE;
 CREATE SCHEMA $SCHEMA;
 CREATE TYPE $SCHEMA.item_status AS ENUM ('draft', 'active', 'retired');
+CREATE TYPE $SCHEMA.dimensions AS (width numeric, unit text);
 CREATE TABLE $SCHEMA.item (
     id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     slug       text NOT NULL,
@@ -80,7 +81,8 @@ CREATE TABLE $SCHEMA.item (
     tags       text[],
     count      integer NOT NULL DEFAULT 0,
     created_at timestamptz NOT NULL DEFAULT now(),
-    parent_id  uuid REFERENCES $SCHEMA.item(id)
+    parent_id  uuid REFERENCES $SCHEMA.item(id),
+    size       $SCHEMA.dimensions
 );
 -- A second schema with a table of the same name, for the database run
 -- below: two ItemMappers that must land in different submodules.
@@ -154,7 +156,7 @@ use std::str::FromStr;
 
 pub mod mapper;
 pub mod model;
-use model::item::{Item, ItemStatus};
+use model::item::{Dimensions, Item, ItemStatus};
 
 #[pyfunction]
 fn sample() -> Item {
@@ -168,6 +170,10 @@ fn sample() -> Item {
         created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
         parent_id: None,
         children: Vec::new(),
+        size: Some(Dimensions {
+            width: Some(Decimal::from_str("2.5").unwrap()),
+            unit: Some("cm".to_string()),
+        }),
     }
 }
 
@@ -210,10 +216,12 @@ import uuid
 
 import protopy_test as protopy
 
-# Registered by the generated `register`s, not by hand.
+# Registered by the generated `register`s, not by hand — the composite
+# type included.
 assert hasattr(protopy, "Item") and hasattr(protopy, "ItemStatus")
 assert hasattr(protopy, "NewItem") and hasattr(protopy, "ItemMapper")
 assert hasattr(protopy, "Database") and hasattr(protopy, "ProtoError")
+assert hasattr(protopy, "Dimensions")
 print("  classes registered by the generated modules")
 
 it = protopy.sample()
@@ -231,6 +239,10 @@ assert it.created_at.tzinfo is not None, "timestamptz must stay aware"
 # The parent's side of the tree crosses as a list of the same class.
 assert it.parent_id is None
 assert it.children == [], it.children
+# A composite crosses as an object of its own class, fields and all.
+assert isinstance(it.size, protopy.Dimensions), type(it.size)
+assert it.size.width == decimal.Decimal("2.5")
+assert it.size.unit == "cm"
 print("  reads   ok")
 
 # set_all has to work, and has to round trip.
@@ -258,6 +270,14 @@ print("  writes  ok")
 it.price = None
 it.tags = None
 assert it.price is None and it.tags is None
+# A composite has no constructor on the Python side, but one read from a
+# row can be edited and put back, and the column can be cleared.
+size = it.size
+size.unit = "mm"
+it.size = size
+assert it.size.unit == "mm"
+it.size = None
+assert it.size is None
 assert protopy.ItemStatus.Draft == protopy.ItemStatus.Draft
 assert protopy.ItemStatus.Draft != protopy.ItemStatus.Active
 assert int(protopy.ItemStatus.Draft) == 0
@@ -365,5 +385,21 @@ grep -q "pub mod python" "$WORK/db/mapper/mod.rs" || {
     exit 1
 }
 echo "  one bridge, two submodules, two ItemMappers"
+# The composite belongs to the first schema alone: filed in its own
+# enums.rs, registered on its own submodule, and absent from the other.
+grep -q "pub struct Dimensions" "$WORK/db/model/$SCHEMA/enums.rs" || {
+    echo "  $SCHEMA's enums.rs does not hold the composite" >&2
+    exit 1
+}
+grep -q "child.add_class::<super::$SCHEMA::enums::Dimensions>()?;" \
+    "$WORK/db/model/python.rs" || {
+    echo "  Dimensions is not registered on $SCHEMA's submodule" >&2
+    exit 1
+}
+if [ -f "$WORK/db/model/${SCHEMA}_2/enums.rs" ]; then
+    echo "  ${SCHEMA}_2 got an enums.rs with nothing to put in it" >&2
+    exit 1
+fi
+echo "  the composite is filed and registered under its own schema"
 
 say "ok"

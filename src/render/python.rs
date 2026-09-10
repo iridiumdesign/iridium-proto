@@ -129,15 +129,16 @@ fn {module}(parent: &Bound<'_, PyModule>) -> PyResult<()> {{
 
 /// `m.add_class::<super::item::Item>()?;` for every class in a group.
 ///
-/// Enums come first: a struct field is typed by one, and reading the
-/// registrations in that order matches how the types depend on each
-/// other. With `inputs`, each writable table's `New…` follows its row.
+/// Enums come first, then composites, then the row structs: a field is
+/// typed by what precedes it, and reading the registrations in that
+/// order matches how the types depend on each other. With `inputs`,
+/// each writable table's `New…` follows its row.
 fn registrations(group: &Group, target: &str, by: usize, inputs: bool) -> String {
     let pad = " ".repeat(by);
     let path = &group.path;
     let mut out = String::new();
 
-    if render::uses_enums(group.models) {
+    if render::uses_types(group.models) {
         for e in dedupe(group.models) {
             let name = naming::pascal_case(&e);
             out.push_str(&format!(
@@ -316,12 +317,20 @@ fn {module}(parent: &Bound<'_, PyModule>) -> PyResult<()> {{
     )
 }
 
+/// The names of every type filed in `enums.rs`: enums, then composites.
 fn dedupe(models: &[Model]) -> Vec<String> {
     let mut seen = Vec::new();
     for model in models {
         for e in &model.enums {
             if !seen.contains(&e.name) {
                 seen.push(e.name.clone());
+            }
+        }
+    }
+    for model in models {
+        for c in &model.composites {
+            if !seen.contains(&c.name) {
+                seen.push(c.name.clone());
             }
         }
     }
@@ -394,6 +403,39 @@ mod tests {
         // Full paths, so two schemas may hold the same table name.
         assert!(out.contains("super::shop::product::Product"), "{out}");
         assert!(out.contains("super::warehouse::order::Order"), "{out}");
+    }
+
+    /// A composite is a model-side class: it registers with the enums
+    /// on its own schema's submodule, ahead of the rows that hold it,
+    /// and never on the mapper bridge.
+    #[test]
+    fn composites_register_with_the_enums_on_their_own_schema() {
+        let generate = Generate::default();
+        let opts = fixture::opts(&generate, Strategy::Embedded);
+        let shop = [fixture::sized_product()];
+        let odd = [fixture::awkward()];
+        let groups = [
+            group("shop", "super::shop", &shop),
+            group("warehouse", "super::warehouse", &odd),
+        ];
+        let out = pymodule_file("store", &groups, &opts);
+
+        let span = out
+            .find("child.add_class::<super::shop::enums::Span>()?;")
+            .expect("nested composite registered");
+        let dims = out
+            .find("child.add_class::<super::shop::enums::Dimensions>()?;")
+            .expect("composite registered");
+        let row = out
+            .find("child.add_class::<super::shop::product::Product>()?;")
+            .expect("row registered");
+        assert!(span < row && dims < row, "{out}");
+        // The other schema has no types of its own to register.
+        assert!(!out.contains("super::warehouse::enums::"), "{out}");
+
+        let bridge = bridge_file(&groups, &opts);
+        assert!(!bridge.contains("Dimensions"), "{bridge}");
+        assert!(!bridge.contains("enums::"), "{bridge}");
     }
 
     #[test]

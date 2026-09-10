@@ -1,26 +1,26 @@
-//! Row structs, the Rust enums behind Postgres enum types, and the insert
-//! input types that go with them.
+//! Row structs, the Rust enums and structs behind Postgres enum and
+//! composite types, and the insert input types that go with them.
 
 use std::collections::BTreeSet;
 
 use super::Rendered;
 use super::children::{self, ChildField};
 use super::{
-    OWNED, Opts, dedupe_enums, derive_line, doc_comment, escape, has_serde, header, import_block,
-    indent, reexport_block,
+    OWNED, Opts, dedupe_composites, dedupe_enums, derive_line, doc_comment, escape, has_serde,
+    header, import_block, indent, reexport_block, sqlx_type_name,
 };
-use crate::introspect::{Column, Model, PgEnum, Table};
+use crate::introspect::{Column, Model, PgComposite, PgEnum, Table};
 use crate::naming;
 use crate::typemap;
 
-/// One table as a standalone module: its enum types, its row struct,
-/// and — when [`Opts::inputs`](super::Opts::inputs) is set — its insert
-/// input type.
+/// One table as a standalone module: its enum and composite types, its
+/// row struct, and — when [`Opts::inputs`](super::Opts::inputs) is set —
+/// its insert input type.
 ///
-/// `enum_path` names the module the enum types live in. `None` defines
-/// them inline, which keeps a single `proto model` self-contained; a
-/// schema run passes `Some("super::enums")` so a type shared by several
-/// tables is defined once.
+/// `enum_path` names the module the enum and composite types live in.
+/// `None` defines them inline, which keeps a single `proto model`
+/// self-contained; a schema run passes `Some("super::enums")` so a type
+/// shared by several tables is defined once.
 pub fn model_file(model: &Model, opts: &Opts, enum_path: Option<&str>) -> Rendered {
     let mut imports = BTreeSet::new();
     let mut reexports = BTreeSet::new();
@@ -34,12 +34,19 @@ pub fn model_file(model: &Model, opts: &Opts, enum_path: Option<&str>) -> Render
                 body.push_str(&enum_block(e, opts, &mut imports));
                 body.push('\n');
             }
+            for c in &model.composites {
+                body.push_str(&composite_block(c, opts, &mut imports, &mut warnings));
+                body.push('\n');
+            }
         }
         // Defined next door, and named in a field of this module's
         // struct, so it is re-exported for whoever holds one.
         Some(path) => {
             for e in &model.enums {
                 reexports.insert(format!("{path}::{}", naming::pascal_case(&e.name)));
+            }
+            for c in &model.composites {
+                reexports.insert(format!("{path}::{}", naming::pascal_case(&c.name)));
             }
         }
     }
@@ -69,8 +76,9 @@ pub fn model_file(model: &Model, opts: &Opts, enum_path: Option<&str>) -> Render
     Rendered { code, warnings }
 }
 
-/// Every table in a schema as one flat file: shared enums once at the top,
-/// then a struct per table. This is what `proto schema` writes to stdout.
+/// Every table in a schema as one flat file: shared enums and composites
+/// once at the top, then a struct per table. This is what `proto schema`
+/// writes to stdout.
 pub fn schema_file(models: &[Model], schema: &str, opts: &Opts) -> Rendered {
     let mut imports = BTreeSet::new();
     let mut warnings = Vec::new();
@@ -78,6 +86,10 @@ pub fn schema_file(models: &[Model], schema: &str, opts: &Opts) -> Rendered {
 
     for e in dedupe_enums(models) {
         body.push_str(&enum_block(&e, opts, &mut imports));
+        body.push('\n');
+    }
+    for c in dedupe_composites(models) {
+        body.push_str(&composite_block(&c, opts, &mut imports, &mut warnings));
         body.push('\n');
     }
     for model in models {
@@ -103,24 +115,27 @@ pub fn schema_file(models: &[Model], schema: &str, opts: &Opts) -> Rendered {
     Rendered { code, warnings }
 }
 
-/// The enum types of a schema, for the `enums.rs` beside the model files.
+/// The enum and composite types of a schema, for the `enums.rs` beside
+/// the model files.
 pub fn enums_file(models: &[Model], schema: &str, opts: &Opts) -> Rendered {
     let mut imports = BTreeSet::new();
+    let mut warnings = Vec::new();
     let mut body = String::new();
     for e in dedupe_enums(models) {
         body.push_str(&enum_block(&e, opts, &mut imports));
         body.push('\n');
     }
+    for c in dedupe_composites(models) {
+        body.push_str(&composite_block(&c, opts, &mut imports, &mut warnings));
+        body.push('\n');
+    }
 
-    let mut code = header(opts, schema, "enum types");
+    let mut code = header(opts, schema, "enum and composite types");
     code.push_str(&import_block(&imports));
     code.push_str(body.trim_end());
     code.push('\n');
 
-    Rendered {
-        code,
-        warnings: Vec::new(),
-    }
+    Rendered { code, warnings }
 }
 
 /// A `mod.rs` declaring the generated modules.
@@ -242,14 +257,9 @@ fn struct_block(
         let mapped = typemap::map(&column.ty, opts.generate);
         imports.extend(mapped.imports.iter().cloned());
         if let Some(unknown) = &mapped.unmapped {
-            fields.push_str(&format!(
-                "    // TODO: unmapped Postgres type `{unknown}` — set \
-                 [generate.types] {unknown} = \"...\"\n"
-            ));
-            warnings.push(format!(
-                "{}.{}.{}: unmapped Postgres type '{unknown}', using String",
-                table.schema, table.name, column.name
-            ));
+            let at = format!("{}.{}.{}", table.schema, table.name, column.name);
+            fields.push_str(&unmapped_todo(unknown));
+            warnings.push(unmapped_warning(&at, column, unknown));
         }
 
         let ty = if column.not_null {
@@ -305,6 +315,76 @@ fn child_field(child: &ChildField, table: &Table, parent: &str, opts: &Opts) -> 
     out
 }
 
+/// The line above a field whose type proto could not map.
+fn unmapped_todo(unknown: &str) -> String {
+    format!(
+        "    // TODO: unmapped Postgres type `{unknown}` — set \
+         [generate.types] {unknown} = \"...\"\n"
+    )
+}
+
+/// The stderr warning for the same, naming the extension the type comes
+/// from when the catalog knows one, and the config line that fixes it.
+fn unmapped_warning(at: &str, column: &Column, unknown: &str) -> String {
+    let from = column
+        .extension
+        .as_deref()
+        .map(|x| format!(" from the {x} extension"))
+        .unwrap_or_default();
+    format!(
+        "{at}: unmapped Postgres type '{unknown}'{from}, using String\n  \
+         add to [generate.types]: {unknown} = \"<rust path>\""
+    )
+}
+
+/// The struct behind a composite type. Every field is `Option`: an
+/// attribute of a composite cannot be declared `NOT NULL`, and a value
+/// built with `ROW(...)` may leave any of them null.
+///
+/// sqlx matches attributes by position, not by name, so no `#[sqlx]`
+/// rename is needed here; the serde rename still is, where the name folds.
+fn composite_block(
+    c: &PgComposite,
+    opts: &Opts,
+    imports: &mut BTreeSet<String>,
+    warnings: &mut Vec<String>,
+) -> String {
+    let name = naming::pascal_case(&c.name);
+    let derives = &opts.generate.composite_derives;
+
+    let mut fields = String::new();
+    for column in &c.fields {
+        let mapped = typemap::map(&column.ty, opts.generate);
+        imports.extend(mapped.imports.iter().cloned());
+        if let Some(unknown) = &mapped.unmapped {
+            let at = format!("{}.{}.{}", c.schema, c.name, column.name);
+            fields.push_str(&unmapped_todo(unknown));
+            warnings.push(unmapped_warning(&at, column, unknown));
+        }
+        let ty = format!("Option<{}>", mapped.text);
+        fields.push_str(&indent(&field(column, &ty, derives, None), 4));
+    }
+
+    let mut out = String::new();
+    if let Some(comment) = &c.comment {
+        out.push_str(&doc_comment(comment, ""));
+        out.push_str("///\n");
+    }
+    out.push_str(&format!(
+        "/// The `{}.{}` composite type. Every field is `Option`: an\n\
+         /// attribute cannot be `NOT NULL`, so any of them may come back null.\n",
+        c.schema, c.name
+    ));
+    out.push_str(&derive_line(derives, imports));
+    out.push_str(&format!(
+        "#[sqlx(type_name = \"{}\")]\n",
+        escape(&sqlx_type_name(&c.schema, &c.name))
+    ));
+    out.push_str(&pyclass(opts));
+    out.push_str(&format!("pub struct {name} {{\n{fields}}}\n"));
+    out
+}
+
 fn enum_block(e: &PgEnum, opts: &Opts, imports: &mut BTreeSet<String>) -> String {
     let name = naming::pascal_case(&e.name);
     let variants: Vec<String> = e.labels.iter().map(|l| naming::pascal_case(l)).collect();
@@ -316,16 +396,7 @@ fn enum_block(e: &PgEnum, opts: &Opts, imports: &mut BTreeSet<String>) -> String
         .zip(&variants)
         .all(|(label, variant)| &naming::snake_case(variant) == label);
 
-    // sqlx matches the type name the server reports. A type outside
-    // `public` is not on the default search_path, so the server names it
-    // with its schema and the attribute has to as well — without this an
-    // enum column fails to decode at run time, which compiling never
-    // catches.
-    let type_name = if e.schema == "public" {
-        e.name.clone()
-    } else {
-        format!("{}.{}", e.schema, e.name)
-    };
+    let type_name = sqlx_type_name(&e.schema, &e.name);
 
     let mut out = format!("/// The `{}.{}` enum type.\n", e.schema, e.name);
     out.push_str(&derive_line(&opts.generate.enum_derives, imports));
@@ -697,6 +768,100 @@ mod tests {
         let inline = model_file(&fixture::product(), &opts, None).code;
         assert!(!inline.contains("pub use"), "{inline}");
         assert!(inline.contains("pub enum ProductStatus {"), "{inline}");
+    }
+
+    #[test]
+    fn a_composite_becomes_a_struct_of_options_filed_with_the_enums() {
+        let generate = Generate::default();
+        let mut opts = fixture::opts(&generate, Strategy::Embedded);
+        opts.pyo3 = true;
+        let model = fixture::sized_product();
+
+        // Inline in a single model: the nested type first, then its
+        // holder, then the row struct that uses both.
+        let out = model_file(&model, &opts, None).code;
+        let span = out.find("pub struct Span {").expect("nested type");
+        let dims = out.find("pub struct Dimensions {").expect("holder");
+        let row = out.find("pub struct Product {").expect("row");
+        assert!(span < dims && dims < row, "{out}");
+        assert!(
+            out.contains(
+                "#[derive(sqlx::Type, Debug, Clone, PartialEq, Serialize, Deserialize)]\n\
+                 #[sqlx(type_name = \"shop.dimensions\")]\n\
+                 #[cfg_attr(feature = \"python\", pyo3::pyclass(get_all, set_all))]\n\
+                 pub struct Dimensions {"
+            ),
+            "{out}"
+        );
+        // Attributes are always nullable, and nest.
+        assert!(out.contains("    pub width: Option<Span>,"), "{out}");
+        assert!(out.contains("    pub unit: Option<String>,"), "{out}");
+        assert!(out.contains("    pub lo: Option<Decimal>,"), "{out}");
+        // The row struct uses the type by its Rust name, arrays included.
+        assert!(out.contains("pub size: Option<Dimensions>,"), "{out}");
+        assert!(out.contains("pub sizes: Option<Vec<Dimensions>>,"), "{out}");
+        // In the input's constructor a composite column is nullable, so it
+        // is keyword-only with a None default, typed by the generated
+        // struct. The struct itself gets no constructor: like a row, it
+        // comes from the database.
+        assert!(
+            out.contains("        price=None,\n        size=None,\n        sizes=None,\n    ))]"),
+            "{out}"
+        );
+        assert!(out.contains("        size: Option<Dimensions>,\n"), "{out}");
+        assert!(!out.contains("impl Dimensions {"), "{out}");
+        assert!(!out.contains("impl Span {"), "{out}");
+        // The composite's own comment leads its doc.
+        assert!(
+            out.contains(
+                "/// Width, height and a unit.\n///\n/// The `shop.dimensions` composite type."
+            ),
+            "{out}"
+        );
+        assert!(syn::parse_file(&out).is_ok(), "{out}");
+
+        // In a schema run the types live next door and are re-exported.
+        let out = model_file(&model, &opts, Some("super::enums")).code;
+        assert!(
+            out.contains("pub use super::enums::{Dimensions, ProductStatus, Span};"),
+            "{out}"
+        );
+        assert!(!out.contains("pub struct Dimensions"), "{out}");
+        let enums = enums_file(std::slice::from_ref(&model), "shop", &opts).code;
+        assert!(enums.contains("pub enum ProductStatus {"), "{enums}");
+        assert!(enums.contains("pub struct Span {"), "{enums}");
+        assert!(enums.contains("pub struct Dimensions {"), "{enums}");
+    }
+
+    #[test]
+    fn an_unmapped_type_names_its_extension_and_the_fix() {
+        let generate = Generate::default();
+        let opts = fixture::opts(&generate, Strategy::Embedded);
+        let mut model = fixture::product();
+        let mut geom = fixture::column(
+            "geom",
+            crate::introspect::PgType::Scalar("geometry".into()),
+            "geometry",
+            false,
+        );
+        geom.extension = Some("postgis".into());
+        model.table.columns.push(geom);
+
+        let rendered = model_file(&model, &opts, None);
+        assert_eq!(
+            rendered.warnings,
+            [
+                "shop.product.geom: unmapped Postgres type 'geometry' from the postgis \
+                 extension, using String\n  add to [generate.types]: geometry = \"<rust path>\""
+            ]
+        );
+        assert!(
+            rendered
+                .code
+                .contains("// TODO: unmapped Postgres type `geometry`"),
+            "{}",
+            rendered.code
+        );
     }
 
     #[test]

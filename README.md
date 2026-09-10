@@ -209,10 +209,10 @@ proto config                 Show the resolved config
 | `--no-manifest` | writers | Leave `Cargo.toml` alone |
 
 `proto schema` without `--out-dir` writes one flat stream: the schema's
-enum types once, then a struct per table. With `--out-dir` it writes
-`<table>.rs` per table, an `enums.rs` when the schema uses enum types,
-and a `mod.rs`. `proto database` does the same one directory per schema,
-plus a top-level `mod.rs`.
+enum and composite types once, then a struct per table. With `--out-dir`
+it writes `<table>.rs` per table, an `enums.rs` when the schema uses
+enum or composite types, and a `mod.rs`. `proto database` does the same
+one directory per schema, plus a top-level `mod.rs`.
 
 A full tree, models and mappers side by side:
 
@@ -274,6 +274,28 @@ pub enum ProductStatus {
 
 Labels that do not round-trip through `snake_case` get an explicit
 `#[sqlx(rename = "...")]` per variant instead.
+
+A composite type — `CREATE TYPE shop.dimensions AS (...)` — becomes a
+struct the same way, filed with the enums:
+
+```rust
+/// The `shop.dimensions` composite type. Every field is `Option`: an
+/// attribute cannot be `NOT NULL`, so any of them may come back null.
+#[derive(sqlx::Type, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[sqlx(type_name = "shop.dimensions")]
+pub struct Dimensions {
+    pub width: Option<Decimal>,
+    pub height: Option<Decimal>,
+    pub unit: Option<String>,
+}
+```
+
+A column of that type is `Option<Dimensions>`, an array of it
+`Option<Vec<Dimensions>>`, and a composite nested inside another is
+generated first. `composite_derives` in the config sets the derives. A
+table's own row type is not a composite for this purpose: a column typed
+by one is reported as unmapped, like any other type `proto` does not
+know.
 
 `--input` adds the insert type:
 
@@ -498,9 +520,18 @@ sibling module `super::<child>`, the layout `--out-dir` writes.
 | `<type>[]` | `Vec<T>` |
 | a domain | its base type |
 | an enum type | a generated Rust enum |
+| a composite type | a generated Rust struct |
 
 Anything else lands as `String` with a `// TODO:` above it and a warning
-on stderr. Fix it once in the config:
+on stderr. Where the type belongs to an extension, the warning says which
+one and prints the config line that fixes it:
+
+```
+warning: shop.place.geom: unmapped Postgres type 'geometry' from the postgis extension, using String
+  add to [generate.types]: geometry = "<rust path>"
+```
+
+Fix it once in the config:
 
 ```toml
 [generate.types]
@@ -831,7 +862,8 @@ Getters and setters come from `get_all, set_all` on the class rather than
 a `#[pyo3(get, set)]` on each field. That is deliberate: `pyclass`
 expands before `cfg_attr` does, so a field-level `cfg_attr` leaves an
 orphaned `pyo3` attribute and the crate will not compile. Enums get
-`pyclass(eq, eq_int)`.
+`pyclass(eq, eq_int)`, and composite types `get_all, set_all` like a row
+struct.
 
 Input types are classes too, with a constructor. A column that is
 `NOT NULL` without a default is a required argument; everything else is
@@ -860,10 +892,10 @@ Declare the feature even when it is off — otherwise every generated file
 draws an `unexpected cfg condition` warning. Rename it with
 `pyo3_feature` in the config.
 
-Where a schema run puts enum types in their own module, each model
-re-exports the ones its struct names, so `model::item::ItemStatus`
-resolves for whoever holds an `Item` and nobody has to know where `proto`
-filed it.
+Where a schema run puts enum and composite types in their own module,
+each model re-exports the ones its struct names, so
+`model::item::ItemStatus` resolves for whoever holds an `Item` and
+nobody has to know where `proto` filed it.
 
 `--pymodule <name>` writes the registration too, so nothing about the
 crossing is hand-maintained:

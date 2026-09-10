@@ -107,6 +107,14 @@ pub fn map(ty: &PgType, generate: &Generate) -> Mapped {
                 ..Mapped::borrowed(naming::pascal_case(name), &[])
             }
         }),
+        PgType::Composite { name, .. } => {
+            override_for(name, &generate.types).unwrap_or_else(|| Mapped {
+                // The struct is generated, so whether it is Copy is
+                // whatever the configured derives say.
+                copy: generate.composite_derives.iter().any(|d| d == "Copy"),
+                ..Mapped::borrowed(naming::pascal_case(name), &[])
+            })
+        }
         PgType::Scalar(name) => override_for(name, &generate.types).unwrap_or_else(|| scalar(name)),
     }
 }
@@ -214,6 +222,19 @@ mod tests {
             name: "product_status".into(),
         };
         assert_eq!(map(&ty, &plain()).text, "ProductStatus");
+    }
+
+    #[test]
+    fn composite_columns_use_the_generated_name_and_borrow() {
+        let ty = PgType::Composite {
+            schema: "shop".into(),
+            name: "dimensions".into(),
+        };
+        let mapped = map(&ty, &plain());
+        assert_eq!(mapped.text, "Dimensions");
+        assert!(mapped.imports.is_empty());
+        // A struct holding Strings is not Copy unless the derives say so.
+        assert!(!mapped.copy);
     }
 
     #[test]
