@@ -197,7 +197,7 @@ proto config                 Show the resolved config
 | `--model-path <path>` | mappers | Module the mappers import models from |
 | `--migrations-dir <dir>` | `--sql server` | Where the migrations go, overriding the config |
 | `--migration-tag <tag>` | `--sql server` | Value for `{tag}` in `migration_name` |
-| `--pyo3` | models | Emit feature-gated pyo3 attributes |
+| `--pyo3` | models, mappers | Emit feature-gated pyo3 attributes |
 | `--input` | `model` | Also emit the `New…` insert type |
 | `-o, --out <file>` | single | Write to a file instead of stdout |
 | `--out-dir <dir>` | bulk | Write one model file per table |
@@ -831,10 +831,17 @@ Getters and setters come from `get_all, set_all` on the class rather than
 a `#[pyo3(get, set)]` on each field. That is deliberate: `pyclass`
 expands before `cfg_attr` does, so a field-level `cfg_attr` leaves an
 orphaned `pyo3` attribute and the crate will not compile. Enums get
-`pyclass(eq, eq_int)`. Input types get no pyo3 attributes at all — a
-`#[pyclass]` without a `#[new]` constructor cannot be built from Python,
-and writing that constructor is a judgment call about which columns are
-required.
+`pyclass(eq, eq_int)`.
+
+Input types are classes too, with a constructor. A column that is
+`NOT NULL` without a default is a required argument; everything else is
+keyword-only and defaults to `None`, which leaves a defaulted column to
+the database:
+
+```python
+NewProduct("dovetail-saw", "Dovetail saw", org_id)
+NewProduct("dovetail-saw", "Dovetail saw", org_id, status=ProductStatus.Active)
+```
 
 The consuming crate declares the feature and the pyo3 conversions its
 column types need. `proto` writes both into `Cargo.toml` when the
@@ -895,6 +902,50 @@ why the classes are named by full path rather than imported.
 The `#[pymodule]` does not have to sit at the crate root — pyo3 exports
 its initializer from a nested module just as well — so a consumer needs
 no glue at all beyond declaring the module.
+
+### Mappers from Python
+
+`--pyo3` on a mapper — `proto mapper shop.product --pyo3`, or `--mappers
+--pyo3` on a schema or database run — adds a Python class beside the
+Rust one, with the same methods:
+
+```python
+db = shop.Database("postgres://shop@localhost/shop")
+products = shop.ProductMapper(db)
+
+made = products.create(NewProduct("dovetail-saw", "Dovetail saw", org_id))
+one = products.find_by_id(made.id)
+one.name = "Dovetail saw, 10in"
+products.update(one)
+products.delete(one.id)
+```
+
+The Rust mappers are `async` and Python, from here, is not: each call
+runs to completion on a tokio runtime the `Database` holds, with the GIL
+released meanwhile. An `asyncio`-native form is a follow-up. Every
+database error arrives as `ProtoError`, a plain `Exception` carrying the
+driver's message, so a lookup that finds nothing is `None` and a failed
+statement is an exception, the same shape as the Rust.
+
+`Database`, `ProtoError`, and a `register` for the mapper classes live
+in a `python.rs` beside the mappers, which a schema or database run
+writes and the mappers' `mod.rs` declares behind the feature. A lone
+`proto mapper --pyo3` assumes that file at `super::python`. The bridge
+has no `#[pymodule]` of its own — an extension has room for one, and the
+model side may already have written it — so register both from yours,
+models first:
+
+```rust
+#[pymodule]
+fn shop(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    model::python::register(m)?;
+    mapper::python::register(m)
+}
+```
+
+The consuming crate needs `tokio` for the runtime, alongside what the
+models already asked for. Both strategies expose the same Python
+surface, since the class wraps whichever mapper is beside it.
 
 Everything crosses as the native Python type, and keeps the schema's
 guarantees on the far side:

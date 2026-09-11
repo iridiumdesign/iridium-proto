@@ -97,6 +97,7 @@ const KNOWN: [&str; 4] = ["chrono", "uuid", "rust_decimal", "serde_json"];
 ///     target: "dev",
 ///     command: "proto model shop.tag".to_string(),
 ///     name_override: None,
+///     bridge_path: "super::python".to_string(),
 /// };
 /// let model = Model {
 ///     table: Table {
@@ -123,11 +124,19 @@ const KNOWN: [&str; 4] = ["chrono", "uuid", "rust_decimal", "serde_json"];
 ///     enums: vec![],
 /// };
 ///
-/// let reqs = requirements([&model], &opts);
+/// let reqs = requirements([&model], &opts, false);
 /// let names: Vec<&str> = reqs.dependencies.iter().map(|d| d.name.as_str()).collect();
 /// assert_eq!(names, ["serde", "sqlx", "uuid"]);
 /// ```
-pub fn requirements<'a>(models: impl IntoIterator<Item = &'a Model>, opts: &Opts) -> Requirements {
+///
+/// `mappers` says whether mapper files were rendered. With `--pyo3`
+/// those carry Python classes that run on a tokio runtime the generated
+/// `Database` holds, so `tokio` joins the list.
+pub fn requirements<'a>(
+    models: impl IntoIterator<Item = &'a Model>,
+    opts: &Opts,
+    mappers: bool,
+) -> Requirements {
     let generate = opts.generate;
     let mut roots = BTreeSet::new();
     let mut foreign = BTreeSet::new();
@@ -178,6 +187,9 @@ pub fn requirements<'a>(models: impl IntoIterator<Item = &'a Model>, opts: &Opts
             optional: true,
             ..Requirement::new("pyo3", "0.26", &[])
         });
+        if mappers {
+            dependencies.push(Requirement::new("tokio", "1", &["rt-multi-thread"]));
+        }
     }
     dependencies.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -499,7 +511,25 @@ mod tests {
         let generate = Generate::default();
         let mut opts = fixture::opts(&generate, Strategy::Embedded);
         opts.pyo3 = pyo3;
-        requirements([&fixture::product()], &opts)
+        requirements([&fixture::product()], &opts, false)
+    }
+
+    #[test]
+    fn mappers_crossing_to_python_bring_the_runtime() {
+        let generate = Generate::default();
+        let mut opts = fixture::opts(&generate, Strategy::Embedded);
+        // Mappers alone need no runtime of their own; sqlx's suffices.
+        let plain = requirements([&fixture::product()], &opts, true);
+        assert!(!names(&plain).contains(&"tokio"));
+        // Their Python classes block on one the generated Database holds.
+        opts.pyo3 = true;
+        let python = requirements([&fixture::product()], &opts, true);
+        let tokio = dependency(&python, "tokio");
+        assert_eq!(tokio.features, ["rt-multi-thread"]);
+        assert!(!tokio.optional);
+        // Models alone, even with --pyo3, do not.
+        let models = requirements([&fixture::product()], &opts, false);
+        assert!(!names(&models).contains(&"tokio"));
     }
 
     fn names(reqs: &Requirements) -> Vec<&str> {
@@ -552,7 +582,7 @@ mod tests {
             list.retain(|d| d != "Serialize" && d != "Deserialize");
         }
         let opts = fixture::opts(&generate, Strategy::Embedded);
-        let reqs = requirements([&fixture::product()], &opts);
+        let reqs = requirements([&fixture::product()], &opts, false);
         assert!(!names(&reqs).contains(&"serde"));
         assert!(dependency(&reqs, "chrono").features.is_empty());
     }
@@ -580,7 +610,7 @@ mod tests {
             .types
             .insert("numeric".into(), "bigdecimal::BigDecimal".into());
         let opts = fixture::opts(&generate, Strategy::Embedded);
-        let reqs = requirements([&fixture::product()], &opts);
+        let reqs = requirements([&fixture::product()], &opts, false);
         assert_eq!(reqs.foreign, ["bigdecimal"]);
         assert!(!names(&reqs).contains(&"rust_decimal"));
     }
@@ -757,7 +787,7 @@ uuid = { version = \"1\", features = [\"serde\"] }
             .types
             .insert("numeric".into(), "bigdecimal::BigDecimal".into());
         let opts = fixture::opts(&generate, Strategy::Embedded);
-        let reqs = requirements([&fixture::product()], &opts);
+        let reqs = requirements([&fixture::product()], &opts, false);
         let mut doc: DocumentMut = BARE.parse().unwrap();
         let outcome = apply(&mut doc, &reqs, None);
         assert!(!outcome.added.iter().any(|a| a == "bigdecimal"));

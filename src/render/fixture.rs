@@ -104,6 +104,7 @@ pub fn opts<'a>(generate: &'a Generate, strategy: Strategy) -> Opts<'a> {
         target: "dev",
         command: "proto mapper shop.product".into(),
         name_override: None,
+        bridge_path: "super::python".to_string(),
     }
 }
 

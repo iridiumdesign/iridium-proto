@@ -74,20 +74,21 @@ async fn run(
                 *force,
             )?;
             if let Some(path) = out {
-                sync_manifest(cli, journal, [&model], &opts, path)?;
+                sync_manifest(cli, journal, [&model], &opts, path, false)?;
             }
             Ok(())
         }
 
         Command::Mapper {
             table,
+            pyo3,
             out,
             name,
             force,
         } => {
             let (schema, relation) = split_ref(table, default_schema(target, generate))?;
             let model = introspect::model(pool, &schema, &relation).await?;
-            let opts = options(cli, generate, target, false, true, name.clone());
+            let opts = options(cli, generate, target, *pyo3, true, name.clone());
             if opts.strategy == Strategy::Server {
                 let migrations = migrations_target(cli, generate)?;
                 report(output::write_migration(
@@ -105,7 +106,7 @@ async fn run(
                 *force,
             )?;
             if let Some(path) = out {
-                sync_manifest(cli, journal, [&model], &opts, path)?;
+                sync_manifest(cli, journal, [&model], &opts, path, true)?;
             }
             Ok(())
         }
@@ -137,11 +138,12 @@ async fn run(
                         journal.write(&dir.join("python.rs"), &code, *force)?;
                     }
                     let feature = python.map(|_| opts.generate.pyo3_feature.as_str());
+                    let bridge = pyo3.then_some(opts.generate.pyo3_feature.as_str());
                     write_schema(
-                        journal, &models, schema, &opts, dir, mappers, feature, *prune, *no_mod,
-                        *force,
+                        journal, &models, schema, &opts, dir, mappers, feature, bridge, *prune,
+                        *no_mod, *force,
                     )?;
-                    sync_manifest(cli, journal, &models, &opts, dir)
+                    sync_manifest(cli, journal, &models, &opts, dir, mappers.is_some())
                 }
                 None if *mappers => Err(Error::Usage(
                     "--mappers needs --out-dir and --mapper-dir".to_string(),
@@ -184,9 +186,13 @@ async fn run(
                 // module path the mappers must import their models from.
                 let mut opts = opts.clone();
                 opts.model_path = format!("{}::{module}", cli.model_path);
+                opts.bridge_path = "super::super::python".to_string();
                 // Models and mappers split by schema; migrations all land
                 // in the one directory, numbered in sequence.
                 let per_schema = mappers.map(|(dir, migrations)| (dir.join(&module), migrations));
+                // Neither Python file goes in a per-schema directory: the
+                // models' module and the mappers' bridge are each written
+                // once, at the root, below.
                 write_schema(
                     journal,
                     &models,
@@ -194,6 +200,7 @@ async fn run(
                     &opts,
                     &out_dir.join(&module),
                     per_schema.as_ref().map(|(d, m)| (d.as_path(), *m)),
+                    None,
                     None,
                     *prune,
                     *no_mod,
@@ -216,17 +223,35 @@ async fn run(
                 journal.write(&out_dir.join("python.rs"), &code, *force)?;
             }
 
+            // The mappers' Python classes stand on one Database, so the
+            // bridge is written once, at the root, over every schema.
+            if let Some((dir, _)) = mappers
+                && *pyo3
+            {
+                let groups: Vec<Group> = groups
+                    .iter()
+                    .map(|(schema, module, models)| Group {
+                        schema: schema.clone(),
+                        path: format!("super::{module}"),
+                        models,
+                    })
+                    .collect();
+                let code = render::python::bridge_file(&groups, &opts);
+                journal.write(&dir.join("python.rs"), &code, *force)?;
+            }
+
             if !*no_mod && !written.is_empty() {
                 let feature = python.map(|_| opts.generate.pyo3_feature.as_str());
                 let code = render::model::mod_file(&written, "database", &opts, feature);
                 journal.write(&out_dir.join("mod.rs"), &code, *force)?;
                 if let Some((dir, _)) = mappers {
-                    let code = render::model::mod_file(&written, "database", &opts, None);
+                    let bridge = pyo3.then_some(opts.generate.pyo3_feature.as_str());
+                    let code = render::model::mod_file(&written, "database", &opts, bridge);
                     journal.write(&dir.join("mod.rs"), &code, *force)?;
                 }
             }
             let models = groups.iter().flat_map(|(_, _, models)| models);
-            sync_manifest(cli, journal, models, &opts, out_dir)
+            sync_manifest(cli, journal, models, &opts, out_dir, mappers.is_some())
         }
 
         Command::List { schema } => match schema {
@@ -269,6 +294,7 @@ fn options<'a>(
         target: &target.label,
         name_override,
         command: command_line(cli),
+        bridge_path: "super::python".to_string(),
     }
 }
 
@@ -437,6 +463,7 @@ fn write_schema(
     dir: &Path,
     mappers: Option<(&Path, Option<Migrations>)>,
     python: Option<&str>,
+    bridge: Option<&str>,
     prune: bool,
     no_mod: bool,
     force: bool,
@@ -486,13 +513,30 @@ fn write_schema(
             )?;
             written.push(module);
         }
+        // The Python classes in those files stand on a Database. `bridge`
+        // names the feature when that Database is to live beside them;
+        // a database run passes `None` and writes one bridge at the root
+        // instead, so a per-schema one here would be a duplicate — and
+        // is not kept on a prune either.
+        if bridge.is_some() {
+            let groups = [Group {
+                schema: schema.to_string(),
+                path: "super".to_string(),
+                models,
+            }];
+            let code = render::python::bridge_file(&groups, opts);
+            journal.write(&mapper_dir.join("python.rs"), &code, force)?;
+        }
         if !no_mod {
-            let code = render::model::mod_file(&written, schema, opts, None);
+            let code = render::model::mod_file(&written, schema, opts, bridge);
             journal.write(&mapper_dir.join("mod.rs"), &code, force)?;
         }
         if prune {
             let mut kept: Vec<String> = written.iter().map(|m| format!("{m}.rs")).collect();
             kept.push("mod.rs".to_string());
+            if bridge.is_some() {
+                kept.push("python.rs".to_string());
+            }
             prune_dir(journal, mapper_dir, &kept)?;
         }
 
@@ -520,11 +564,12 @@ fn sync_manifest<'a>(
     models: impl IntoIterator<Item = &'a Model>,
     opts: &Opts,
     from: &Path,
+    mappers: bool,
 ) -> Result<()> {
     if cli.no_manifest || !opts.generate.manifest {
         return Ok(());
     }
-    let requirements = manifest::requirements(models, opts);
+    let requirements = manifest::requirements(models, opts, mappers);
     manifest::sync(journal, from, &requirements)
 }
 
@@ -604,9 +649,14 @@ fn command_line(cli: &Cli) -> String {
                 parts.push(format!("--name {name}"));
             }
         }
-        Command::Mapper { table, name, .. } => {
+        Command::Mapper {
+            table, pyo3, name, ..
+        } => {
             parts.push("mapper".into());
             parts.push(table.clone());
+            if *pyo3 {
+                parts.push("--pyo3".into());
+            }
             if let Some(name) = name {
                 parts.push(format!("--name {name}"));
             }
