@@ -68,8 +68,8 @@ pub enum PgType {
     },
     /// A user-defined composite type — `CREATE TYPE ... AS (...)` — which
     /// becomes a generated Rust struct. A table's own row type is not
-    /// one of these; a column typed by one stays a [`PgType::Scalar`]
-    /// proto does not know.
+    /// one of these; a column typed by one stays a [`PgType::Scalar`].
+    /// proto does not know it, and says so.
     Composite {
         /// Schema the type lives in.
         schema: String,
@@ -297,12 +297,17 @@ SELECT a.attname::text                        AS name,
        bt.typname::text                       AS base_name,
        bt.typtype::text                       AS base_kind,
        bn.nspname::text                       AS base_schema,
+       ebt.typname::text                      AS elem_base_name,
+       ebt.typtype::text                      AS elem_base_kind,
+       ebn.nspname::text                      AS elem_base_schema,
        tr.relkind::text                       AS type_relkind,
        er.relkind::text                       AS elem_relkind,
        br.relkind::text                       AS base_relkind,
+       ebr.relkind::text                      AS elem_base_relkind,
        tx.extname::text                       AS type_extension,
        ex.extname::text                       AS elem_extension,
        bx.extname::text                       AS base_extension,
+       ebx.extname::text                      AS elem_base_extension,
        format_type(a.atttypid, a.atttypmod)   AS sql_type,
        (a.atthasdef OR a.attidentity <> '')   AS has_default,
        pg_get_expr(d.adbin, d.adrelid)        AS default_expr,
@@ -318,9 +323,12 @@ SELECT a.attname::text                        AS name,
   LEFT JOIN pg_namespace en ON en.oid = et.typnamespace
   LEFT JOIN pg_type bt      ON bt.oid = NULLIF(t.typbasetype, 0)
   LEFT JOIN pg_namespace bn ON bn.oid = bt.typnamespace
+  LEFT JOIN pg_type ebt     ON ebt.oid = NULLIF(et.typbasetype, 0)
+  LEFT JOIN pg_namespace ebn ON ebn.oid = ebt.typnamespace
   LEFT JOIN pg_class tr     ON tr.oid = NULLIF(t.typrelid, 0)
   LEFT JOIN pg_class er     ON er.oid = NULLIF(et.typrelid, 0)
   LEFT JOIN pg_class br     ON br.oid = NULLIF(bt.typrelid, 0)
+  LEFT JOIN pg_class ebr    ON ebr.oid = NULLIF(ebt.typrelid, 0)
   LEFT JOIN LATERAL (
        SELECT x.extname
          FROM pg_depend dp
@@ -348,6 +356,15 @@ SELECT a.attname::text                        AS name,
           AND dp.refclassid = 'pg_extension'::regclass
           AND dp.deptype = 'e'
         LIMIT 1) bx ON TRUE
+  LEFT JOIN LATERAL (
+       SELECT x.extname
+         FROM pg_depend dp
+         JOIN pg_extension x ON x.oid = dp.refobjid
+        WHERE dp.classid = 'pg_type'::regclass
+          AND dp.objid = ebt.oid
+          AND dp.refclassid = 'pg_extension'::regclass
+          AND dp.deptype = 'e'
+        LIMIT 1) ebx ON TRUE
   LEFT JOIN pg_attrdef d    ON d.adrelid = c.oid AND d.adnum = a.attnum
  WHERE cn.nspname = $1
    AND c.relname = $2
@@ -622,44 +639,81 @@ async fn read_columns(pool: &PgPool, schema: &str, relation: &str) -> Result<Vec
     Ok(columns)
 }
 
+/// One type as the column query describes it, before proto has decided
+/// what it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RawType {
+    /// `pg_type.typname`.
+    name: String,
+    /// `pg_type.typtype`: `b`ase, `e`num, `c`omposite, `d`omain, ...
+    kind: Option<String>,
+    /// The type's schema.
+    schema: Option<String>,
+    /// For a composite, the `relkind` of the class behind it: `c` for a
+    /// standalone type, `r` and the rest for a relation's row type.
+    relkind: Option<String>,
+    /// The extension the type belongs to, if any.
+    extension: Option<String>,
+}
+
+/// What the column query says about a column's type: the type itself,
+/// its element when it is an array, and the base behind whichever of
+/// those is a domain.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RawColumnType {
+    ty: RawType,
+    elem: Option<RawType>,
+    elem_base: Option<RawType>,
+    base: Option<RawType>,
+}
+
 /// Resolve one column's type: unwrap the domain, unwrap the array, and
 /// note whether what is left is an enum or a composite. Alongside it, the
 /// extension that owns whatever type proto will have to map.
 fn column_type(row: &sqlx::postgres::PgRow) -> (PgType, Option<String>) {
-    let kind: String = row.get("type_kind");
-    let elem_name: Option<String> = row.get("elem_name");
+    let raw = |prefix: &str| -> Option<RawType> {
+        let name: Option<String> = row.get(format!("{prefix}_name").as_str());
+        let field = |what: &str| row.get::<Option<String>, _>(format!("{prefix}_{what}").as_str());
+        Some(RawType {
+            name: name?,
+            kind: field("kind"),
+            schema: field("schema"),
+            relkind: field("relkind"),
+            extension: field("extension"),
+        })
+    };
+    resolve_type(RawColumnType {
+        ty: raw("type").expect("a column has a type"),
+        elem: raw("elem"),
+        elem_base: raw("elem_base"),
+        base: raw("base"),
+    })
+}
 
-    // Arrays first: `_text` carries its element in typelem.
-    if let Some(elem_name) = elem_name {
-        let inner = user_type(
-            row.get::<Option<String>, _>("elem_kind").as_deref(),
-            row.get::<Option<String>, _>("elem_relkind").as_deref(),
-            row.get::<Option<String>, _>("elem_schema"),
-            elem_name,
-        );
-        return (PgType::Array(Box::new(inner)), row.get("elem_extension"));
+/// The decision behind [`column_type`], on what the query returned.
+fn resolve_type(raw: RawColumnType) -> (PgType, Option<String>) {
+    // Arrays first: `_text` carries its element in typelem. An element
+    // that is a domain stands in for its base, the way a domain column
+    // does, and it is the base that an extension owns.
+    if let Some(elem) = raw.elem {
+        let elem = match (elem.kind.as_deref(), raw.elem_base) {
+            (Some("d"), Some(base)) => base,
+            _ => elem,
+        };
+        let extension = elem.extension.clone();
+        return (PgType::Array(Box::new(user_type(elem))), extension);
     }
 
     // A domain stands in for its base type.
-    if kind == "d"
-        && let Some(base_name) = row.get::<Option<String>, _>("base_name")
+    if raw.ty.kind.as_deref() == Some("d")
+        && let Some(base) = raw.base
     {
-        let base = user_type(
-            row.get::<Option<String>, _>("base_kind").as_deref(),
-            row.get::<Option<String>, _>("base_relkind").as_deref(),
-            row.get::<Option<String>, _>("base_schema"),
-            base_name,
-        );
-        return (base, row.get("base_extension"));
+        let extension = base.extension.clone();
+        return (user_type(base), extension);
     }
 
-    let ty = user_type(
-        Some(kind.as_str()),
-        row.get::<Option<String>, _>("type_relkind").as_deref(),
-        row.get("type_schema"),
-        row.get("type_name"),
-    );
-    (ty, row.get("type_extension"))
+    let extension = raw.ty.extension.clone();
+    (user_type(raw.ty), extension)
 }
 
 /// A relation's primary key and its unique keys, in index order.
@@ -689,17 +743,18 @@ async fn read_keys(
 
 /// An enum, a standalone composite, or — for everything else, a table's
 /// row type included — the bare name.
-fn user_type(
-    kind: Option<&str>,
-    relkind: Option<&str>,
-    schema: Option<String>,
-    name: String,
-) -> PgType {
-    let schema = schema.unwrap_or_else(|| "public".to_string());
-    match (kind, relkind) {
-        (Some("e"), _) => PgType::Enum { schema, name },
-        (Some("c"), Some("c")) => PgType::Composite { schema, name },
-        _ => PgType::Scalar(name),
+fn user_type(raw: RawType) -> PgType {
+    let schema = raw.schema.unwrap_or_else(|| "public".to_string());
+    match (raw.kind.as_deref(), raw.relkind.as_deref()) {
+        (Some("e"), _) => PgType::Enum {
+            schema,
+            name: raw.name,
+        },
+        (Some("c"), Some("c")) => PgType::Composite {
+            schema,
+            name: raw.name,
+        },
+        _ => PgType::Scalar(raw.name),
     }
 }
 
@@ -732,9 +787,51 @@ async fn read_composites(pool: &PgPool, table: &Table) -> Result<Vec<PgComposite
         });
     }
 
-    // Holders were found first; reverse so what they hold comes first.
-    composites.reverse();
-    Ok(composites)
+    Ok(dependencies_first(composites))
+}
+
+/// `composites` with every type ahead of the types that hold it, so the
+/// generated definitions read dependencies first.
+///
+/// Discovery is breadth-first from the columns, and that is not the
+/// same order: a type both named by a column and nested in a type named
+/// later is found before its holder, so reversing the list would put
+/// the holder first. A depth-first postorder over the fields gets it
+/// right whatever the columns say. Postgres does not let a composite
+/// contain itself, so there is no cycle to guard against; the visited
+/// set is for a type reached by two routes.
+fn dependencies_first(composites: Vec<PgComposite>) -> Vec<PgComposite> {
+    fn visit(at: usize, composites: &[PgComposite], seen: &mut [bool], order: &mut Vec<usize>) {
+        if seen[at] {
+            return;
+        }
+        seen[at] = true;
+        for field in &composites[at].fields {
+            let ty = match &field.ty {
+                PgType::Array(inner) => inner.as_ref(),
+                other => other,
+            };
+            if let PgType::Composite { schema, name } = ty
+                && let Some(dep) = composites
+                    .iter()
+                    .position(|c| &c.schema == schema && &c.name == name)
+            {
+                visit(dep, composites, seen, order);
+            }
+        }
+        order.push(at);
+    }
+
+    let mut seen = vec![false; composites.len()];
+    let mut order = Vec::with_capacity(composites.len());
+    for at in 0..composites.len() {
+        visit(at, &composites, &mut seen, &mut order);
+    }
+    let mut slots: Vec<Option<PgComposite>> = composites.into_iter().map(Some).collect();
+    order
+        .into_iter()
+        .map(|at| slots[at].take().expect("each index is taken once"))
+        .collect()
 }
 
 /// Add every user type among `columns` that `keep` accepts to `wanted`,
@@ -785,4 +882,116 @@ async fn read_enums(
         });
     }
     Ok(enums)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn raw(name: &str, kind: &str, extension: Option<&str>) -> RawType {
+        RawType {
+            name: name.to_string(),
+            kind: Some(kind.to_string()),
+            schema: Some("public".to_string()),
+            relkind: (kind == "c").then(|| "c".to_string()),
+            extension: extension.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn an_array_of_a_domain_resolves_to_the_base_and_its_extension() {
+        // local_geometry[] where local_geometry is a domain over PostGIS
+        // geometry: the element unwraps to geometry, and the extension
+        // hint is PostGIS's, not the domain's own (a domain has none).
+        let (ty, extension) = resolve_type(RawColumnType {
+            ty: raw("_local_geometry", "b", None),
+            elem: Some(raw("local_geometry", "d", None)),
+            elem_base: Some(raw("geometry", "b", Some("postgis"))),
+            base: None,
+        });
+        match ty {
+            PgType::Array(inner) => {
+                assert!(matches!(*inner, PgType::Scalar(ref n) if n == "geometry"))
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(extension.as_deref(), Some("postgis"));
+
+        // A plain array of an extension type keeps working as before.
+        let (_, extension) = resolve_type(RawColumnType {
+            ty: raw("_hstore", "b", None),
+            elem: Some(raw("hstore", "b", Some("hstore"))),
+            elem_base: None,
+            base: None,
+        });
+        assert_eq!(extension.as_deref(), Some("hstore"));
+    }
+
+    #[test]
+    fn only_a_standalone_composite_is_a_composite() {
+        let (ty, _) = resolve_type(RawColumnType {
+            ty: raw("dimensions", "c", None),
+            ..Default::default()
+        });
+        assert!(matches!(ty, PgType::Composite { ref name, .. } if name == "dimensions"));
+
+        // A column typed by a table's row type: relkind is the table's.
+        let mut row_type = raw("item", "c", None);
+        row_type.relkind = Some("r".to_string());
+        let (ty, _) = resolve_type(RawColumnType {
+            ty: row_type,
+            ..Default::default()
+        });
+        assert!(matches!(ty, PgType::Scalar(ref name) if name == "item"));
+    }
+
+    fn composite(name: &str, fields: &[(&str, PgType)]) -> PgComposite {
+        PgComposite {
+            schema: "shop".into(),
+            name: name.into(),
+            comment: None,
+            fields: fields
+                .iter()
+                .map(|(field, ty)| Column {
+                    name: (*field).to_string(),
+                    ty: ty.clone(),
+                    sql_type: String::new(),
+                    not_null: false,
+                    comment: None,
+                    has_default: false,
+                    default_expr: None,
+                    identity: false,
+                    generated: false,
+                    extension: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_nested_type_named_directly_still_comes_before_its_holder() {
+        // Columns `a a, b b` where b holds a: discovery lists a first,
+        // then b, and a reversal would put B's definition before A's.
+        let a = || composite("a", &[("lo", PgType::Scalar("numeric".into()))]);
+        let b = || {
+            composite(
+                "b",
+                &[(
+                    "inner",
+                    PgType::Array(Box::new(PgType::Composite {
+                        schema: "shop".into(),
+                        name: "a".into(),
+                    })),
+                )],
+            )
+        };
+        let names = |list: Vec<PgComposite>| -> Vec<String> {
+            dependencies_first(list)
+                .into_iter()
+                .map(|c| c.name)
+                .collect()
+        };
+        assert_eq!(names(vec![a(), b()]), ["a", "b"]);
+        assert_eq!(names(vec![b(), a()]), ["a", "b"]);
+    }
 }

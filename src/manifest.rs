@@ -16,7 +16,7 @@ use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 use crate::error::{Error, Result};
 use crate::introspect::Model;
 use crate::output::{Change, Journal};
-use crate::render::{Opts, has_serde};
+use crate::render::{Opts, generated_composites, has_serde};
 use crate::typemap;
 
 /// One crate the generated code needs.
@@ -149,8 +149,11 @@ pub fn requirements<'a>(
 
     for model in models {
         enums |= !model.enums.is_empty();
-        composites |= !model.composites.is_empty();
-        let attributes = model.composites.iter().flat_map(|c| &c.fields);
+        // An overridden composite is the crate's own type: what it needs
+        // is declared wherever it is defined, not here.
+        let mut generated = generated_composites(model, generate).peekable();
+        composites |= generated.peek().is_some();
+        let attributes = generated.flat_map(|c| &c.fields);
         for column in model.table.columns.iter().chain(attributes) {
             let mapped = typemap::map(&column.ty, generate);
             for import in &mapped.imports {
@@ -591,6 +594,26 @@ mod tests {
                 .iter()
                 .any(|f| f == "rust_decimal")
         );
+    }
+
+    #[test]
+    fn an_overridden_composites_attributes_are_the_crates_business() {
+        // `span` overridden: its numeric attributes are no longer proto's
+        // to declare for, so with `price` gone nothing needs rust_decimal.
+        let mut generate = Generate::default();
+        generate
+            .types
+            .insert("span".into(), "my_crate::Span".into());
+        let opts = fixture::opts(&generate, Strategy::Embedded);
+        let mut model = fixture::sized_product();
+        model.table.columns.retain(|c| c.name != "price");
+        let reqs = requirements([&model], &opts, false);
+        assert!(
+            !names(&reqs).contains(&"rust_decimal"),
+            "{:?}",
+            names(&reqs)
+        );
+        assert_eq!(reqs.foreign, ["my_crate"]);
     }
 
     #[test]

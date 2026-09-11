@@ -6,8 +6,8 @@ use std::collections::BTreeSet;
 use super::Rendered;
 use super::children::{self, ChildField};
 use super::{
-    OWNED, Opts, dedupe_composites, dedupe_enums, derive_line, doc_comment, escape, has_serde,
-    header, import_block, indent, reexport_block, sqlx_type_name,
+    OWNED, Opts, dedupe_composites, dedupe_enums, derive_line, doc_comment, escape,
+    generated_composites, has_serde, header, import_block, indent, reexport_block, sqlx_type_name,
 };
 use crate::introspect::{Column, Model, PgComposite, PgEnum, Table};
 use crate::naming;
@@ -34,7 +34,7 @@ pub fn model_file(model: &Model, opts: &Opts, enum_path: Option<&str>) -> Render
                 body.push_str(&enum_block(e, opts, &mut imports));
                 body.push('\n');
             }
-            for c in &model.composites {
+            for c in generated_composites(model, opts.generate) {
                 body.push_str(&composite_block(c, opts, &mut imports, &mut warnings));
                 body.push('\n');
             }
@@ -45,7 +45,7 @@ pub fn model_file(model: &Model, opts: &Opts, enum_path: Option<&str>) -> Render
             for e in &model.enums {
                 reexports.insert(format!("{path}::{}", naming::pascal_case(&e.name)));
             }
-            for c in &model.composites {
+            for c in generated_composites(model, opts.generate) {
                 reexports.insert(format!("{path}::{}", naming::pascal_case(&c.name)));
             }
         }
@@ -88,7 +88,7 @@ pub fn schema_file(models: &[Model], schema: &str, opts: &Opts) -> Rendered {
         body.push_str(&enum_block(&e, opts, &mut imports));
         body.push('\n');
     }
-    for c in dedupe_composites(models) {
+    for c in dedupe_composites(models, opts.generate) {
         body.push_str(&composite_block(&c, opts, &mut imports, &mut warnings));
         body.push('\n');
     }
@@ -125,7 +125,7 @@ pub fn enums_file(models: &[Model], schema: &str, opts: &Opts) -> Rendered {
         body.push_str(&enum_block(&e, opts, &mut imports));
         body.push('\n');
     }
-    for c in dedupe_composites(models) {
+    for c in dedupe_composites(models, opts.generate) {
         body.push_str(&composite_block(&c, opts, &mut imports, &mut warnings));
         body.push('\n');
     }
@@ -245,14 +245,8 @@ fn struct_block(
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut fields = String::new();
     for column in &table.columns {
-        let ident = naming::ident(&column.name);
-        if !seen.insert(ident.clone()) {
-            warnings.push(format!(
-                "{}.{}: two columns reduce to the field name `{ident}`; \
-                 rename one or the generated struct will not compile",
-                table.schema, table.name
-            ));
-        }
+        let at = format!("{}.{}", table.schema, table.name);
+        warnings.extend(duplicate_field(&mut seen, column, &at));
 
         let mapped = typemap::map(&column.ty, opts.generate);
         imports.extend(mapped.imports.iter().cloned());
@@ -315,6 +309,19 @@ fn child_field(child: &ChildField, table: &Table, parent: &str, opts: &Opts) -> 
     out
 }
 
+/// The warning for a second column of `at` reducing to a field name
+/// already taken: the generated struct would not compile. The field is
+/// still written, so the file shows the collision where it happens.
+fn duplicate_field(seen: &mut BTreeSet<String>, column: &Column, at: &str) -> Option<String> {
+    let ident = naming::ident(&column.name);
+    (!seen.insert(ident.clone())).then(|| {
+        format!(
+            "{at}: two columns reduce to the field name `{ident}`; \
+             rename one or the generated struct will not compile"
+        )
+    })
+}
+
 /// The line above a field whose type proto could not map.
 fn unmapped_todo(unknown: &str) -> String {
     format!(
@@ -352,8 +359,14 @@ fn composite_block(
     let name = naming::pascal_case(&c.name);
     let derives = &opts.generate.composite_derives;
 
+    let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut fields = String::new();
     for column in &c.fields {
+        warnings.extend(duplicate_field(
+            &mut seen,
+            column,
+            &format!("{}.{}", c.schema, c.name),
+        ));
         let mapped = typemap::map(&column.ty, opts.generate);
         imports.extend(mapped.imports.iter().cloned());
         if let Some(unknown) = &mapped.unmapped {
@@ -831,6 +844,72 @@ mod tests {
         assert!(enums.contains("pub enum ProductStatus {"), "{enums}");
         assert!(enums.contains("pub struct Span {"), "{enums}");
         assert!(enums.contains("pub struct Dimensions {"), "{enums}");
+    }
+
+    /// `[generate.types] dimensions = "my_crate::Dimensions"` means the
+    /// crate supplies the type. proto then neither defines it, re-exports
+    /// it, nor files it in `enums.rs` — any of which would collide with
+    /// the import — and the fields use the crate's type. A composite it
+    /// nests, left alone, is still generated.
+    #[test]
+    fn an_overridden_composite_is_the_crates_not_protos() {
+        let mut generate = Generate::default();
+        generate
+            .types
+            .insert("dimensions".into(), "my_crate::Dimensions".into());
+        let opts = fixture::opts(&generate, Strategy::Embedded);
+        let model = fixture::sized_product();
+
+        let out = model_file(&model, &opts, None).code;
+        assert!(out.contains("use my_crate::Dimensions;"), "{out}");
+        assert!(out.contains("pub size: Option<Dimensions>,"), "{out}");
+        assert!(!out.contains("pub struct Dimensions"), "{out}");
+        assert!(out.contains("pub struct Span {"), "{out}");
+        assert!(syn::parse_file(&out).is_ok(), "{out}");
+
+        let out = model_file(&model, &opts, Some("super::enums")).code;
+        assert!(
+            out.contains("pub use super::enums::{ProductStatus, Span};"),
+            "{out}"
+        );
+        let enums = enums_file(std::slice::from_ref(&model), "shop", &opts).code;
+        assert!(!enums.contains("Dimensions"), "{enums}");
+        assert!(enums.contains("pub struct Span {"), "{enums}");
+    }
+
+    #[test]
+    fn composite_attributes_that_collide_are_reported_like_columns() {
+        let generate = Generate::default();
+        let opts = fixture::opts(&generate, Strategy::Embedded);
+        let mut model = fixture::sized_product();
+        // `a-b` and `a_b` both reduce to `a_b`.
+        let dims = model
+            .composites
+            .iter_mut()
+            .find(|c| c.name == "dimensions")
+            .unwrap();
+        dims.fields.push(fixture::column(
+            "a-b",
+            crate::introspect::PgType::Scalar("text".into()),
+            "text",
+            false,
+        ));
+        dims.fields.push(fixture::column(
+            "a_b",
+            crate::introspect::PgType::Scalar("text".into()),
+            "text",
+            false,
+        ));
+        let rendered = model_file(&model, &opts, None);
+        assert!(
+            rendered
+                .warnings
+                .iter()
+                .any(|w| w
+                    .starts_with("shop.dimensions: two columns reduce to the field name `a_b`")),
+            "{:?}",
+            rendered.warnings
+        );
     }
 
     #[test]

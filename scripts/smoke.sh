@@ -94,6 +94,9 @@ CREATE TABLE $SCHEMA.item (
     tags       text[],
     bin_id     uuid NOT NULL REFERENCES $SCHEMA.bin(id),
     created_at timestamptz NOT NULL DEFAULT now(),
+    -- The nested type named directly, and before its holder: the
+    -- definitions still have to come out with span first.
+    width      $SCHEMA.span,
     size       $SCHEMA.dimensions,
     sizes      $SCHEMA.dimensions[]
 );
@@ -208,6 +211,14 @@ grep -qF 'pub sizes: Option<Vec<Dimensions>>,' "$WORK/src/model/item.rs" || {
     echo "  item.rs does not hold the composite array" >&2
     exit 1
 }
+# span is named by a column ahead of dimensions, which holds it, so
+# discovery finds it first; the definition still has to come first too.
+SPAN_AT=$(grep -n 'pub struct Span {' "$WORK/src/model/enums.rs" | cut -d: -f1)
+DIMS_AT=$(grep -n 'pub struct Dimensions {' "$WORK/src/model/enums.rs" | cut -d: -f1)
+if [ "$SPAN_AT" -gt "$DIMS_AT" ]; then
+    echo "  enums.rs defines Dimensions before the Span it holds" >&2
+    exit 1
+fi
 
 say "compiling the generated crate, and linting it as hard as this one"
 printf 'pub mod mapper;\npub mod mapper_server;\npub mod model;\n' > "$WORK/src/lib.rs"
@@ -246,12 +257,16 @@ use proto_smoke::model::bin::NewBin;
 use proto_smoke::model::category::NewCategory;
 use proto_smoke::model::item::{Dimensions, ItemStatus, NewItem, Span};
 
+fn span(lo: &str, hi: &str) -> Span {
+    Span {
+        lo: Some(Decimal::from_str(lo).unwrap()),
+        hi: Some(Decimal::from_str(hi).unwrap()),
+    }
+}
+
 fn dims(lo: &str, hi: &str, unit: &str) -> Dimensions {
     Dimensions {
-        width: Some(Span {
-            lo: Some(Decimal::from_str(lo).unwrap()),
-            hi: Some(Decimal::from_str(hi).unwrap()),
-        }),
+        width: Some(span(lo, hi)),
         unit: Some(unit.to_string()),
     }
 }
@@ -280,6 +295,7 @@ macro_rules! round_trip {
                     price: Some(Decimal::from_str("19.99")?),
                     tags: Some(vec!["a".to_string(), "b".to_string()]),
                     bin_id: bin.id,
+                    width: Some(span("0", "1")),
                     size: Some(dims("1", "2", "cm")),
                     sizes: Some(vec![dims("3", "4", "mm"), dims("5", "6", "in")]),
                 })
@@ -295,6 +311,7 @@ macro_rules! round_trip {
             assert_eq!(found.price, Some(Decimal::from_str("19.99")?));
             assert_eq!(found.tags.as_deref(), Some(&["a".to_string(), "b".to_string()][..]));
             assert!(found.created_at.timestamp() > 0, "the server filled this in");
+            assert_eq!(found.width, Some(span("0", "1")));
             assert_eq!(found.size, Some(dims("1", "2", "cm")));
             assert_eq!(found.sizes, Some(vec![dims("3", "4", "mm"), dims("5", "6", "in")]));
 
@@ -308,6 +325,7 @@ macro_rules! round_trip {
                     price: None,
                     tags: None,
                     bin_id: bin.id,
+                    width: None,
                     size: None,
                     sizes: None,
                 })
@@ -405,7 +423,7 @@ SELECT id AS bin_id FROM $SCHEMA.bin_insert('B1') \\gset
 -- A NULL status must fall through COALESCE to the column default.
 SELECT id AS item_id
   FROM $SCHEMA.item_insert('widget', 'Widget', NULL, 9.99,
-                           ARRAY['a','b'], :'bin_id',
+                           ARRAY['a','b'], :'bin_id', ROW(0, 1)::$SCHEMA.span,
                            ROW(ROW(1, 2), 'cm')::$SCHEMA.dimensions,
                            ARRAY[ROW(ROW(3, 4), 'mm')]::$SCHEMA.dimensions[]) \\gset
 
@@ -419,7 +437,7 @@ SELECT count(*) AS listed  FROM $SCHEMA.item_list();
 \\echo '  update'
 SELECT name, status, price, (size).unit
   FROM $SCHEMA.item_update(:'item_id', 'widget', 'Widget 2', 'active',
-                           19.99, ARRAY['c'], :'bin_id',
+                           19.99, ARRAY['c'], :'bin_id', NULL,
                            ROW(ROW(5, 6), 'in')::$SCHEMA.dimensions, NULL);
 
 \\echo '  reserved words and folding columns'

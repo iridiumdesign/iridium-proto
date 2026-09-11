@@ -215,14 +215,35 @@ fn dedupe_enums(models: &[Model]) -> Vec<PgEnum> {
     out
 }
 
-/// A schema's composite types, once each, nested ones first. Two tables
-/// naming the same type contribute it once; a type nested in another is
-/// already listed before its holder within each model, and stays so.
-fn dedupe_composites(models: &[Model]) -> Vec<PgComposite> {
+/// Whether `[generate.types]` names a composite. The crate supplies the
+/// type then, so proto neither defines, re-exports, nor registers it —
+/// any of which would collide with the import — and its attributes are
+/// the crate's business rather than proto's.
+pub(crate) fn overridden(c: &PgComposite, generate: &Generate) -> bool {
+    generate.types.contains_key(&c.name)
+}
+
+/// The composites proto generates for a model: every one the config
+/// does not override.
+pub(crate) fn generated_composites<'a>(
+    model: &'a Model,
+    generate: &'a Generate,
+) -> impl Iterator<Item = &'a PgComposite> {
+    model
+        .composites
+        .iter()
+        .filter(move |c| !overridden(c, generate))
+}
+
+/// A schema's generated composite types, once each, nested ones first.
+/// Two tables naming the same type contribute it once; a type nested in
+/// another is already listed before its holder within each model, and
+/// stays so.
+fn dedupe_composites(models: &[Model], generate: &Generate) -> Vec<PgComposite> {
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
     for model in models {
-        for c in &model.composites {
+        for c in generated_composites(model, generate) {
             if seen.insert((c.schema.clone(), c.name.clone())) {
                 out.push(c.clone());
             }

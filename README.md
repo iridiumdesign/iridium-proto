@@ -290,12 +290,15 @@ pub struct Dimensions {
 }
 ```
 
-A column of that type is `Option<Dimensions>`, an array of it
-`Option<Vec<Dimensions>>`, and a composite nested inside another is
-generated first. `composite_derives` in the config sets the derives. A
-table's own row type is not a composite for this purpose: a column typed
-by one is reported as unmapped, like any other type `proto` does not
-know.
+A column of that type follows the nullability rule every column does:
+`Dimensions` when it is `NOT NULL`, `Option<Dimensions>` otherwise, and
+an array of it `Vec<Dimensions>` or `Option<Vec<Dimensions>>` the same
+way. A composite nested inside another is generated first.
+`composite_derives` in the config sets the derives. A table's own row
+type is not a composite for this purpose: a column typed by one is
+reported as unmapped, like any other type `proto` does not know. A
+composite named in `[generate.types]` is yours: `proto` uses the type
+you point it at and generates nothing for it.
 
 `--input` adds the insert type:
 
