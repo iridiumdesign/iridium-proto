@@ -145,6 +145,40 @@ fn finder_name(columns: &[&Column]) -> String {
     format!("find_by_{}", joined(columns, "_and_"))
 }
 
+/// The `call` of a table's finder on `column`, given its keys — what
+/// [`operations`] would name the function behind `find_by_<column>`.
+///
+/// For the parent's side of a foreign key, which has the child's names
+/// but not its [`Table`]. Same rule as above: a foreign key's finder
+/// gives way to a key or unique finder of the same method name, and so
+/// does the function it calls.
+pub fn finder_call(column: &str, primary_key: &[String], unique_keys: &[Vec<String>]) -> String {
+    let wanted = joined_names(std::slice::from_ref(&column));
+    if !primary_key.is_empty() && joined_names(primary_key) == wanted {
+        return "get".to_string();
+    }
+    for unique in unique_keys {
+        let joined = joined_names(unique);
+        if joined == wanted {
+            return format!("by_{joined}");
+        }
+    }
+    format!("by_{column}")
+}
+
+/// [`joined`], for names rather than columns.
+fn joined_names<S: AsRef<str>>(names: &[S]) -> String {
+    names
+        .iter()
+        .map(|n| {
+            naming::ident(n.as_ref())
+                .trim_start_matches("r#")
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("_and_")
+}
+
 pub(crate) fn joined(columns: &[&Column], sep: &str) -> String {
     columns
         .iter()
@@ -164,4 +198,53 @@ pub fn function_name(table: &Table, call: &str) -> String {
 /// `shop.product_insert`, quoted where the names need it.
 pub fn function(table: &Table, call: &str) -> String {
     quoting::qualified(&table.schema, &function_name(table, call))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::fixture;
+
+    /// What the child's finder is called from the parent's side has to
+    /// be what the child's own plan calls it.
+    fn call_of(table: &Table, column: &str) -> String {
+        let method = format!("find_by_{}", naming::ident(column));
+        operations(table)
+            .into_iter()
+            .find(|op| op.method == method)
+            .map(|op| op.call)
+            .expect("a finder on the column")
+    }
+
+    #[test]
+    fn the_exposed_rule_agrees_with_the_plan() {
+        let mut model = fixture::product();
+        let t = &model.table;
+        assert_eq!(
+            finder_call("org_id", &t.primary_key, &t.unique_keys),
+            call_of(t, "org_id")
+        );
+
+        // A unique column that reduces to the same finder name: the
+        // unique finder wins, and so does its function.
+        model.table.unique_keys.push(vec!["org_id".into()]);
+        let t = &model.table;
+        assert_eq!(
+            finder_call("org_id", &t.primary_key, &t.unique_keys),
+            call_of(t, "org_id")
+        );
+        assert_eq!(
+            finder_call("org_id", &t.primary_key, &t.unique_keys),
+            "by_org_id"
+        );
+
+        // The key itself: `get`.
+        model.table.primary_key = vec!["org_id".into()];
+        let t = &model.table;
+        assert_eq!(
+            finder_call("org_id", &t.primary_key, &t.unique_keys),
+            call_of(t, "org_id")
+        );
+        assert_eq!(finder_call("org_id", &t.primary_key, &t.unique_keys), "get");
+    }
 }

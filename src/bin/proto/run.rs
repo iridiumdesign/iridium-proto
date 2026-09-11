@@ -475,6 +475,9 @@ fn write_schema(
         let mut written = Vec::new();
         for model in models {
             let rendered = render::mapper::mapper_file(model, opts);
+            for warning in &rendered.warnings {
+                output::warn(warning);
+            }
             let module = naming::ident(&model.table.name);
             journal.write(
                 &mapper_dir.join(format!("{module}.rs")),

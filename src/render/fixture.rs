@@ -81,6 +81,8 @@ pub fn product() -> Model {
                 table: "variant".into(),
                 column: "product_id".into(),
                 ref_column: "id".into(),
+                primary_key: vec!["id".into()],
+                unique_keys: Vec::new(),
             }],
         },
         enums: vec![PgEnum {
@@ -169,6 +171,8 @@ pub fn category() -> Model {
                 table: "category".into(),
                 column: "parent_id".into(),
                 ref_column: "id".into(),
+                primary_key: vec!["id".into()],
+                unique_keys: Vec::new(),
             }],
         },
         enums: Vec::new(),

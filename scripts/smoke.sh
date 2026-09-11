@@ -98,6 +98,16 @@ CREATE TABLE $SCHEMA.category (
     name      text NOT NULL,
     parent_id uuid REFERENCES $SCHEMA.category(id)
 );
+-- One-to-one: the referring column is unique, so item gets no children
+-- field for it. The index carries an INCLUDE column, which follows the
+-- key in pg_index.indkey and must not hide the fact that the key alone
+-- is the foreign key column.
+CREATE TABLE $SCHEMA.spec (
+    id      uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    item_id uuid NOT NULL REFERENCES $SCHEMA.item(id),
+    note    text
+);
+CREATE UNIQUE INDEX spec_item ON $SCHEMA.spec (item_id) INCLUDE (note);
 COMMENT ON TABLE $SCHEMA.item IS 'A thing on a shelf.';
 COMMENT ON COLUMN $SCHEMA.item.slug IS 'Stable external identifier.';
 
@@ -169,6 +179,13 @@ grep -q '^# Ours: the decode binary' "$WORK/Cargo.toml" || {
     cat "$WORK/manifest.log" >&2
     exit 1
 }
+
+say "a one-to-one link is not a collection"
+if grep -q 'Vec<Spec>' "$WORK/src/model/item.rs"; then
+    echo "  item got a children field for a unique foreign key column" >&2
+    exit 1
+fi
+echo "  item holds no spec rows: the referring column is unique"
 
 say "compiling the generated crate, and linting it as hard as this one"
 printf 'pub mod mapper;\npub mod mapper_server;\npub mod model;\n' > "$WORK/src/lib.rs"
@@ -577,6 +594,42 @@ psql -q -v ON_ERROR_STOP=1 -c "DROP TABLE $SCHEMA.\"order\" CASCADE;"
     exit 1
 }
 echo "  pruned the model, kept the hand-written file"
+
+say "a parent down to one child table: the field is renamed, cleanly"
+# bin held `item` and `order`; with order gone it holds `children`. The
+# old fields, the methods that filled them and the import order needed
+# have to go with it, or the crate stops compiling.
+"$PROTO" --db "$TARGET" --sql server --migrations-dir "$WORK/migrations" \
+    schema "$SCHEMA" --pyo3 --mappers --prune \
+    --out-dir "$WORK/src/model" --mapper-dir "$WORK/src/mapper_server" \
+    >/dev/null 2>&1
+grep -q "pub children: Vec<Item>," "$WORK/src/model/bin.rs" || {
+    echo "  the surviving child did not take the default name" >&2
+    exit 1
+}
+for gone in "pub item:" "pub order:" "order::Order"; do
+    if grep -q "$gone" "$WORK/src/model/bin.rs"; then
+        echo "  still in the model after the rename: $gone" >&2
+        exit 1
+    fi
+done
+for dir in mapper mapper_server; do
+    grep -q "pub async fn load_children" "$WORK/src/$dir/bin.rs" || {
+        echo "  $dir: the loader for the renamed field did not arrive" >&2
+        exit 1
+    }
+    for gone in "load_item" "load_order" "with_item" "with_order"; do
+        if grep -q "$gone" "$WORK/src/$dir/bin.rs"; then
+            echo "  $dir: a stale method survived the rename: $gone" >&2
+            exit 1
+        fi
+    done
+done
+(cd "$WORK" && cargo check --quiet --lib) || {
+    echo "  the tree does not compile after the rename" >&2
+    exit 1
+}
+echo "  renamed the field, took back the old loaders, and it compiles"
 
 say "regenerating: the migrations should be left alone"
 "$PROTO" --db "$TARGET" --sql server --migrations-dir "$WORK/migrations" \

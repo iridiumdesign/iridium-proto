@@ -462,10 +462,18 @@ children = { category = "subcategories", product = "products" }
 
 `children_field = ""` generates no children fields at all.
 
-Under `--sql server` the parent's mapper calls the child's own
-`by_<column>` function, so nothing new is needed on the server. A
+Under `--sql server` the parent's mapper calls the child's own finder
+function, so nothing new is needed on the server. That function is
+written by the *child's* migration, when the child's mapper is
+generated: a schema or database run writes both, and a parent generated
+on its own with `proto mapper` expects the child's to exist. A
 one-to-one link, where the referring column is itself unique, is not a
-collection and gets no field. Neither does a child in another schema,
+collection and gets no field. A field that would collide — with a
+column called `children`, say, or a child table named `date_time` whose
+`DateTime` shadows `chrono`'s — is skipped with a warning that says how
+to rename it. When a field goes away or is renamed, the methods that
+filled it and the import it needed go with it; regenerating leaves no
+stale loader behind. Neither does a child in another schema,
 or one excluded by `exclude_tables`: its type would not be there to
 name. A single `proto model` run imports the child's type from the
 sibling module `super::<child>`, the layout `--out-dir` writes.

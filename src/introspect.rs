@@ -167,6 +167,11 @@ pub struct Child {
     pub column: String,
     /// The column here that it refers to — the primary key, nearly always.
     pub ref_column: String,
+    /// The child's own primary key, for naming the finder the parent's
+    /// loader calls; see [`crate::render::plan::finder_call`].
+    pub primary_key: Vec<String>,
+    /// The child's unique keys, likewise.
+    pub unique_keys: Vec<Vec<String>>,
 }
 
 impl Table {
@@ -321,7 +326,9 @@ SELECT array_agg(a.attname::text ORDER BY k.ord) AS cols,
 
 // The other side of FOREIGN_KEY_SQL: every single-column foreign key
 // that points at this table. A referring column that is itself unique
-// makes a one-to-one, which is not a collection, so it is left out.
+// makes a one-to-one, which is not a collection, so it is left out. Only
+// the key part of an index decides that: INCLUDE columns follow the key
+// in indkey and do not make it any less unique on the column.
 const CHILDREN_SQL: &str = "\
 SELECT n.nspname::text  AS schema,
        t.relname::text  AS table,
@@ -344,7 +351,8 @@ SELECT n.nspname::text  AS schema,
           AND i.indisunique
           AND i.indpred IS NULL
           AND i.indexprs IS NULL
-          AND i.indkey::int2[] = c.conkey)
+          AND i.indnkeyatts = 1
+          AND i.indkey[0] = c.conkey[1])
  ORDER BY c.oid";
 
 const ENUM_SQL: &str = "\
@@ -456,17 +464,7 @@ pub async fn model(pool: &PgPool, schema: &str, table: &str) -> Result<Model> {
         });
     }
 
-    let pk = sqlx::query(PRIMARY_KEY_SQL)
-        .bind(schema)
-        .bind(table)
-        .fetch_all(pool)
-        .await?;
-
-    let uniques = sqlx::query(UNIQUE_SQL)
-        .bind(schema)
-        .bind(table)
-        .fetch_all(pool)
-        .await?;
+    let (primary_key, unique_keys) = read_keys(pool, schema, table).await?;
 
     let fks = sqlx::query(FOREIGN_KEY_SQL)
         .bind(schema)
@@ -474,11 +472,25 @@ pub async fn model(pool: &PgPool, schema: &str, table: &str) -> Result<Model> {
         .fetch_all(pool)
         .await?;
 
-    let children = sqlx::query(CHILDREN_SQL)
+    let mut children = Vec::new();
+    for row in sqlx::query(CHILDREN_SQL)
         .bind(schema)
         .bind(table)
         .fetch_all(pool)
-        .await?;
+        .await?
+    {
+        let (child_schema, child_table): (String, String) = (row.get("schema"), row.get("table"));
+        // The child's keys name the finder the parent's loader calls.
+        let (primary_key, unique_keys) = read_keys(pool, &child_schema, &child_table).await?;
+        children.push(Child {
+            schema: child_schema,
+            table: child_table,
+            column: row.get("column"),
+            ref_column: row.get("ref_column"),
+            primary_key,
+            unique_keys,
+        });
+    }
 
     let table = Table {
         schema: schema.to_string(),
@@ -486,11 +498,8 @@ pub async fn model(pool: &PgPool, schema: &str, table: &str) -> Result<Model> {
         kind,
         comment: relation.get("comment"),
         columns,
-        primary_key: pk.iter().map(|r| r.get::<String, _>("name")).collect(),
-        unique_keys: uniques
-            .iter()
-            .map(|r| r.get::<Vec<String>, _>("cols"))
-            .collect(),
+        primary_key,
+        unique_keys,
         foreign_keys: fks
             .iter()
             .map(|r| ForeignKey {
@@ -499,15 +508,7 @@ pub async fn model(pool: &PgPool, schema: &str, table: &str) -> Result<Model> {
                 ref_table: r.get("ref_table"),
             })
             .collect(),
-        children: children
-            .iter()
-            .map(|r| Child {
-                schema: r.get("schema"),
-                table: r.get("table"),
-                column: r.get("column"),
-                ref_column: r.get("ref_column"),
-            })
-            .collect(),
+        children,
     };
 
     let enums = read_enums(pool, &table).await?;
@@ -559,6 +560,31 @@ fn column_type(row: &sqlx::postgres::PgRow) -> PgType {
     }
 
     PgType::Scalar(row.get("type_name"))
+}
+
+/// A relation's primary key and its unique keys, in index order.
+async fn read_keys(
+    pool: &PgPool,
+    schema: &str,
+    table: &str,
+) -> Result<(Vec<String>, Vec<Vec<String>>)> {
+    let pk = sqlx::query(PRIMARY_KEY_SQL)
+        .bind(schema)
+        .bind(table)
+        .fetch_all(pool)
+        .await?;
+    let uniques = sqlx::query(UNIQUE_SQL)
+        .bind(schema)
+        .bind(table)
+        .fetch_all(pool)
+        .await?;
+    Ok((
+        pk.iter().map(|r| r.get::<String, _>("name")).collect(),
+        uniques
+            .iter()
+            .map(|r| r.get::<Vec<String>, _>("cols"))
+            .collect(),
+    ))
 }
 
 async fn read_enums(pool: &PgPool, table: &Table) -> Result<Vec<PgEnum>> {

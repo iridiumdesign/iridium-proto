@@ -263,13 +263,15 @@ fn struct_block(
         ));
     }
 
-    for child in children::of(table, opts.generate) {
+    let children = children::of(table, opts.generate);
+    warnings.extend(children.warnings);
+    for child in &children.fields {
         if let Some(path) = sibling
             && !child.is_self(table)
         {
             imports.insert(format!("{path}::{}::{}", child.module, child.ty));
         }
-        fields.push_str(&indent(&child_field(&child, table, &name, opts), 4));
+        fields.push_str(&indent(&child_field(child, table, &name, opts), 4));
     }
 
     format!("{docs}{derives}{pyclass}pub struct {name} {{\n{fields}}}\n")
