@@ -179,17 +179,19 @@ pub fn bridge_file(groups: &[Group], opts: &Opts) -> String {
         .join(", ");
     let mut code = header(opts, &source, "python bridge");
 
-    let mut classes = String::new();
-    for group in groups {
-        let path = &group.path;
-        for model in group.models {
-            let module = naming::ident(&model.table.name);
-            let name = naming::pascal_case(&model.table.name);
-            classes.push_str(&format!(
-                "    m.add_class::<{path}::{module}::Py{name}Mapper>()?;\n"
-            ));
-        }
-    }
+    // One schema registers its mapper classes flat. Several put each
+    // schema's in a submodule, as the models' module does: two schemas
+    // may each hold a `product`, and one namespace cannot hold both
+    // `ProductMapper`s.
+    let (classes, submodules) = match groups {
+        [only] => (mapper_registrations(only, "m"), String::new()),
+        many => (
+            many.iter()
+                .map(|g| format!("    {}(m)?;\n", naming::ident(&g.schema)))
+                .collect(),
+            many.iter().map(mapper_submodule).collect(),
+        ),
+    };
 
     code.push_str(&format!(
         r#"use pyo3::prelude::*;
@@ -217,13 +219,19 @@ pub struct Database {{
 #[pymethods]
 impl Database {{
     /// Connect. The URL is what sqlx takes: `postgres://user@host/db`.
+    ///
+    /// The handshake runs with the GIL released, like every call after
+    /// it; only the URL is read while it is held.
     #[new]
-    fn new(url: &str) -> PyResult<Self> {{
+    fn new(py: Python<'_>, url: &str) -> PyResult<Self> {{
+        let url = url.to_string();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .map_err(|e| ProtoError::new_err(e.to_string()))?;
-        let pool = runtime.block_on(PgPool::connect(url)).map_err(error)?;
+        let pool = py
+            .detach(|| runtime.block_on(PgPool::connect(&url)))
+            .map_err(error)?;
         Ok(Self {{ pool, runtime }})
     }}
 }}
@@ -239,7 +247,7 @@ impl Database {{
 pub fn run<T: Send>(
     db: &Database,
     py: Python<'_>,
-    future: impl Future<Output = Result<T, sqlx::Error>> + Send,
+    future: impl std::future::Future<Output = Result<T, sqlx::Error>> + Send,
 ) -> PyResult<T> {{
     py.detach(|| db.runtime.block_on(future)).map_err(error)
 }}
@@ -257,9 +265,55 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {{
     m.add_class::<Database>()?;
 {classes}    Ok(())
 }}
-"#
+{submodules}"#
     ));
     code
+}
+
+/// `<target>.add_class::<super::item::PyItemMapper>()?;` for every
+/// mapper in a group.
+fn mapper_registrations(group: &Group, target: &str) -> String {
+    let path = &group.path;
+    let mut out = String::new();
+    for model in group.models {
+        let module = naming::ident(&model.table.name);
+        let name = naming::pascal_case(&model.table.name);
+        out.push_str(&format!(
+            "    {target}.add_class::<{path}::{module}::Py{name}Mapper>()?;\n"
+        ));
+    }
+    out
+}
+
+/// One schema's mapper classes, registered on its submodule. The models'
+/// `register` runs first and has usually made that submodule already, so
+/// this adds to it rather than replacing it; when it has not, the
+/// submodule is made and put in `sys.modules` the same way.
+fn mapper_submodule(group: &Group) -> String {
+    let module = naming::ident(&group.schema);
+    let schema = &group.schema;
+    let classes = mapper_registrations(group, "child");
+    format!(
+        r#"
+/// The `{schema}` schema's mappers.
+fn {module}(parent: &Bound<'_, PyModule>) -> PyResult<()> {{
+    let child = match parent.getattr("{module}") {{
+        Ok(existing) => existing.downcast_into::<PyModule>()?,
+        Err(_) => {{
+            let child = PyModule::new(parent.py(), "{module}")?;
+            parent.add_submodule(&child)?;
+            parent
+                .py()
+                .import("sys")?
+                .getattr("modules")?
+                .set_item(format!("{{}}.{module}", parent.name()?), &child)?;
+            child
+        }}
+    }};
+{classes}    Ok(())
+}}
+"#
+    )
 }
 
 fn dedupe(models: &[Model]) -> Vec<String> {
@@ -378,12 +432,36 @@ mod tests {
         );
         assert!(out.contains("pub struct Database {"), "{out}");
         assert!(out.contains("ProtoError"), "{out}");
+        // Two schemas: each registers its mappers on its own submodule,
+        // added to if the models' register made it first. Database and
+        // the exception stay at the root.
+        assert!(out.contains("    shop(m)?;\n    warehouse(m)?;\n"), "{out}");
         assert!(
-            out.contains("m.add_class::<super::shop::product::PyProductMapper>()?;"),
+            out.contains("fn shop(parent: &Bound<'_, PyModule>) -> PyResult<()>"),
             "{out}"
         );
         assert!(
-            out.contains("m.add_class::<super::warehouse::order::PyOrderMapper>()?;"),
+            out.contains("child.add_class::<super::shop::product::PyProductMapper>()?;"),
+            "{out}"
+        );
+        assert!(
+            out.contains("child.add_class::<super::warehouse::order::PyOrderMapper>()?;"),
+            "{out}"
+        );
+        assert!(
+            out.contains("existing.downcast_into::<PyModule>()?"),
+            "{out}"
+        );
+        assert!(out.contains("m.add_class::<Database>()?;"), "{out}");
+        // No prelude is assumed for the future, and the connect runs
+        // with the GIL released like everything after it.
+        assert!(out.contains("impl std::future::Future<Output"), "{out}");
+        assert!(
+            out.contains("fn new(py: Python<'_>, url: &str) -> PyResult<Self>"),
+            "{out}"
+        );
+        assert!(
+            out.contains(".detach(|| runtime.block_on(PgPool::connect(&url)))"),
             "{out}"
         );
         // One initialiser per extension, and the model side owns it.
@@ -396,6 +474,20 @@ mod tests {
             crate::reconcile::reconcile(&out, &out).as_deref(),
             Some(out.as_str())
         );
+    }
+
+    #[test]
+    fn one_schema_registers_its_mappers_flat() {
+        let generate = Generate::default();
+        let mut opts = fixture::opts(&generate, Strategy::Embedded);
+        opts.pyo3 = true;
+        let models = [fixture::product()];
+        let out = bridge_file(&[group("shop", "super", &models)], &opts);
+        assert!(
+            out.contains("    m.add_class::<super::product::PyProductMapper>()?;"),
+            "{out}"
+        );
+        assert!(!out.contains("add_submodule"), "{out}");
     }
 
     #[test]

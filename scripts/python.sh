@@ -23,6 +23,7 @@ PROTO="${CARGO_TARGET_DIR:-target}/debug/proto"
 cleanup() {
     if [ -n "${PSQL_DB:-}" ]; then
         psql -q -c "DROP SCHEMA IF EXISTS $SCHEMA CASCADE;" >/dev/null 2>&1 || true
+        psql -q -c "DROP SCHEMA IF EXISTS ${SCHEMA}_2 CASCADE;" >/dev/null 2>&1 || true
     fi
     rm -rf "$WORK"
 }
@@ -80,6 +81,14 @@ CREATE TABLE $SCHEMA.item (
     count      integer NOT NULL DEFAULT 0,
     created_at timestamptz NOT NULL DEFAULT now(),
     parent_id  uuid REFERENCES $SCHEMA.item(id)
+);
+-- A second schema with a table of the same name, for the database run
+-- below: two ItemMappers that must land in different submodules.
+DROP SCHEMA IF EXISTS ${SCHEMA}_2 CASCADE;
+CREATE SCHEMA ${SCHEMA}_2;
+CREATE TABLE ${SCHEMA}_2.item (
+    id   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    slug text NOT NULL
 );
 SQL
 
@@ -318,5 +327,43 @@ else:
 print("  errors  arrive as ProtoError")
 PY
 )
+
+say "a database run: one bridge at the root, mappers by schema"
+# Not compiled here — that would build every schema in the database —
+# but the layout is what the compile would stand or fall on: exactly
+# one bridge, declared once, and each schema's mapper classes on its
+# own submodule so two `item` tables do not collide.
+mkdir -p "$WORK/db/model" "$WORK/db/mapper"
+"$PROTO" --db "$TARGET" database --pyo3 --pymodule store --mappers \
+    --no-manifest --out-dir "$WORK/db/model" --mapper-dir "$WORK/db/mapper" \
+    >/dev/null 2>&1
+test -f "$WORK/db/mapper/python.rs" || {
+    echo "  no bridge at the mapper root" >&2
+    exit 1
+}
+for schema in "$SCHEMA" "${SCHEMA}_2"; do
+    if [ -f "$WORK/db/mapper/$schema/python.rs" ]; then
+        echo "  a per-schema bridge was written for $schema" >&2
+        exit 1
+    fi
+    if grep -q "pub mod python" "$WORK/db/mapper/$schema/mod.rs"; then
+        echo "  $schema's mapper mod.rs declares a bridge it does not have" >&2
+        exit 1
+    fi
+    grep -q "fn $schema(parent: &Bound<'_, PyModule>)" "$WORK/db/mapper/python.rs" || {
+        echo "  the bridge has no submodule for $schema" >&2
+        exit 1
+    }
+    grep -q "child.add_class::<super::$schema::item::PyItemMapper>()?;" \
+        "$WORK/db/mapper/python.rs" || {
+        echo "  $schema's ItemMapper is not registered on its submodule" >&2
+        exit 1
+    }
+done
+grep -q "pub mod python" "$WORK/db/mapper/mod.rs" || {
+    echo "  the root mapper mod.rs does not declare the bridge" >&2
+    exit 1
+}
+echo "  one bridge, two submodules, two ItemMappers"
 
 say "ok"

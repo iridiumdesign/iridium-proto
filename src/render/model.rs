@@ -436,10 +436,12 @@ fn constructor(columns: &[&Column], opts: &Opts, name: &str) -> String {
         let mapped = typemap::map(&column.ty, opts.generate);
         let ty = input_type(column, &mapped.text);
         let param = format!("{ident}: {ty}");
-        if ty.starts_with("Option<") {
-            optional.push((format!("{ident}=None"), param));
-        } else {
+        // The schema decides, not the rendered type: an override may
+        // spell a type `Option<…>` for a column that still refuses NULL.
+        if input_required(column) {
             required.push((ident.clone(), param));
+        } else {
+            optional.push((format!("{ident}=None"), param));
         }
         fields.push(ident);
     }
@@ -483,11 +485,17 @@ impl {name} {{
 /// A column with a literal default is optional on insert even when it is
 /// `NOT NULL`, because omitting it is how you ask for the default.
 fn input_type(column: &Column, ty: &str) -> String {
-    if column.not_null && column.literal_default().is_none() {
+    if input_required(column) {
         ty.to_string()
     } else {
         format!("Option<{ty}>")
     }
+}
+
+/// Whether an insert has to supply the column: `NOT NULL` with nothing
+/// to fall back on.
+fn input_required(column: &Column) -> bool {
+    column.not_null && column.literal_default().is_none()
 }
 
 #[cfg(test)]
@@ -540,6 +548,24 @@ mod tests {
         // And without the flag, the input is a plain struct.
         let plain = render(false).code;
         assert!(!plain.contains("impl NewProduct"), "{plain}");
+    }
+
+    #[test]
+    fn the_constructor_follows_the_schema_not_the_rendered_type() {
+        // An override that spells a NOT NULL column's type as Option must
+        // not make the argument optional: the column still refuses NULL.
+        let mut generate = Generate::default();
+        generate
+            .types
+            .insert("uuid".into(), "Option<MyUuid>".into());
+        let mut opts = fixture::opts(&generate, Strategy::Embedded);
+        opts.pyo3 = true;
+        let out = model_file(&fixture::product(), &opts, None).code;
+        assert!(
+            out.contains("    #[pyo3(signature = (\n        slug,\n        name,\n        org_id,\n        *,"),
+            "{out}"
+        );
+        assert!(out.contains("org_id: Option<MyUuid>,"), "{out}");
     }
 
     #[test]

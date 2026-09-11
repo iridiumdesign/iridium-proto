@@ -138,9 +138,10 @@ async fn run(
                         journal.write(&dir.join("python.rs"), &code, *force)?;
                     }
                     let feature = python.map(|_| opts.generate.pyo3_feature.as_str());
+                    let bridge = pyo3.then_some(opts.generate.pyo3_feature.as_str());
                     write_schema(
-                        journal, &models, schema, &opts, dir, mappers, feature, *prune, *no_mod,
-                        *force,
+                        journal, &models, schema, &opts, dir, mappers, feature, bridge, *prune,
+                        *no_mod, *force,
                     )?;
                     sync_manifest(cli, journal, &models, &opts, dir, mappers.is_some())
                 }
@@ -189,6 +190,9 @@ async fn run(
                 // Models and mappers split by schema; migrations all land
                 // in the one directory, numbered in sequence.
                 let per_schema = mappers.map(|(dir, migrations)| (dir.join(&module), migrations));
+                // Neither Python file goes in a per-schema directory: the
+                // models' module and the mappers' bridge are each written
+                // once, at the root, below.
                 write_schema(
                     journal,
                     &models,
@@ -196,6 +200,7 @@ async fn run(
                     &opts,
                     &out_dir.join(&module),
                     per_schema.as_ref().map(|(d, m)| (d.as_path(), *m)),
+                    None,
                     None,
                     *prune,
                     *no_mod,
@@ -458,6 +463,7 @@ fn write_schema(
     dir: &Path,
     mappers: Option<(&Path, Option<Migrations>)>,
     python: Option<&str>,
+    bridge: Option<&str>,
     prune: bool,
     no_mod: bool,
     force: bool,
@@ -507,9 +513,11 @@ fn write_schema(
             )?;
             written.push(module);
         }
-        // The Python classes in those files stand on a Database that
-        // lives beside them, and is only written when they were asked for.
-        let bridge = opts.pyo3.then_some(opts.generate.pyo3_feature.as_str());
+        // The Python classes in those files stand on a Database. `bridge`
+        // names the feature when that Database is to live beside them;
+        // a database run passes `None` and writes one bridge at the root
+        // instead, so a per-schema one here would be a duplicate — and
+        // is not kept on a prune either.
         if bridge.is_some() {
             let groups = [Group {
                 schema: schema.to_string(),
@@ -526,7 +534,9 @@ fn write_schema(
         if prune {
             let mut kept: Vec<String> = written.iter().map(|m| format!("{m}.rs")).collect();
             kept.push("mod.rs".to_string());
-            kept.push("python.rs".to_string());
+            if bridge.is_some() {
+                kept.push("python.rs".to_string());
+            }
             prune_dir(journal, mapper_dir, &kept)?;
         }
 
