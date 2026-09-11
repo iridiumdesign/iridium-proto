@@ -28,6 +28,9 @@ enum_derives = [
     "sqlx::Type", "Debug", "Clone", "Copy",
     "PartialEq", "Eq", "Serialize", "Deserialize",
 ]
+composite_derives = [
+    "sqlx::Type", "Debug", "Clone", "PartialEq", "Serialize", "Deserialize",
+]
 input_derives = ["Debug", "Clone", "Serialize", "Deserialize"]
 pyo3_feature = "python"
 default_schema = "public"

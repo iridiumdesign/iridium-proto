@@ -5,7 +5,9 @@
 //! pointing back at it. `shop.category` is a tree.
 
 use crate::config::Generate;
-use crate::introspect::{Child, Column, ForeignKey, Model, PgEnum, PgType, RelKind, Table};
+use crate::introspect::{
+    Child, Column, ForeignKey, Model, PgComposite, PgEnum, PgType, RelKind, Table,
+};
 
 use super::{Opts, Strategy};
 
@@ -20,6 +22,7 @@ pub fn column(name: &str, ty: PgType, sql_type: &str, not_null: bool) -> Column 
         default_expr: None,
         identity: false,
         generated: false,
+        extension: None,
     }
 }
 
@@ -90,7 +93,53 @@ pub fn product() -> Model {
             name: "product_status".into(),
             labels: vec!["draft".into(), "active".into()],
         }],
+        composites: Vec::new(),
     }
+}
+
+/// `shop.product` with two more columns: a composite, and an array of
+/// it. The composite nests another, so both levels are covered.
+pub fn sized_product() -> Model {
+    let composite = |name: &str| PgType::Composite {
+        schema: "shop".into(),
+        name: name.into(),
+    };
+    let mut model = product();
+    model.table.columns.push(column(
+        "size",
+        composite("dimensions"),
+        "shop.dimensions",
+        false,
+    ));
+    model.table.columns.push(column(
+        "sizes",
+        PgType::Array(Box::new(composite("dimensions"))),
+        "shop.dimensions[]",
+        false,
+    ));
+    // Nested first, as introspection lists them.
+    model.composites = vec![
+        PgComposite {
+            schema: "shop".into(),
+            name: "span".into(),
+            comment: None,
+            fields: vec![
+                column("lo", PgType::Scalar("numeric".into()), "numeric", false),
+                column("hi", PgType::Scalar("numeric".into()), "numeric", false),
+            ],
+        },
+        PgComposite {
+            schema: "shop".into(),
+            name: "dimensions".into(),
+            comment: Some("Width, height and a unit.".into()),
+            fields: vec![
+                column("width", composite("span"), "shop.span", false),
+                column("height", composite("span"), "shop.span", false),
+                column("unit", PgType::Scalar("text".into()), "text", false),
+            ],
+        },
+    ];
+    model
 }
 
 /// Options pointing at that table, with everything else at its default.
@@ -140,6 +189,7 @@ pub fn awkward() -> Model {
             children: Vec::new(),
         },
         enums: Vec::new(),
+        composites: Vec::new(),
     }
 }
 
@@ -177,5 +227,6 @@ pub fn category() -> Model {
             }],
         },
         enums: Vec::new(),
+        composites: Vec::new(),
     }
 }

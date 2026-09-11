@@ -43,6 +43,7 @@ fn column(name: &str, sql_type: &str, not_null: bool) -> Column {
         default_expr: None,
         identity: false,
         generated: false,
+        extension: None,
     }
 }
 
@@ -69,6 +70,7 @@ fn hostile() -> Model {
             children: Vec::new(),
         },
         enums: Vec::new(),
+        composites: Vec::new(),
     }
 }
 
@@ -277,6 +279,7 @@ fn the_migration_escapes_names_used_as_literals() {
             ..hostile().table
         },
         enums: Vec::new(),
+        composites: Vec::new(),
     };
     let quoted = render::sql::migration_file(&apostrophe, &opts(&generate, Strategy::Server));
     assert!(quoted.contains("'it''s_insert'"), "{quoted}");

@@ -13,7 +13,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::Generate;
-use crate::introspect::{Model, PgEnum};
+use crate::introspect::{Model, PgComposite, PgEnum};
 
 pub mod children;
 #[cfg(test)]
@@ -215,8 +215,60 @@ fn dedupe_enums(models: &[Model]) -> Vec<PgEnum> {
     out
 }
 
-/// Whether any table references an enum type — decides if a schema run
-/// needs an `enums.rs` at all.
-pub fn uses_enums(models: &[Model]) -> bool {
-    models.iter().any(|m| !m.enums.is_empty())
+/// Whether `[generate.types]` names a composite. The crate supplies the
+/// type then, so proto neither defines, re-exports, nor registers it —
+/// any of which would collide with the import — and its attributes are
+/// the crate's business rather than proto's.
+pub(crate) fn overridden(c: &PgComposite, generate: &Generate) -> bool {
+    generate.types.contains_key(&c.name)
+}
+
+/// The composites proto generates for a model: every one the config
+/// does not override.
+pub(crate) fn generated_composites<'a>(
+    model: &'a Model,
+    generate: &'a Generate,
+) -> impl Iterator<Item = &'a PgComposite> {
+    model
+        .composites
+        .iter()
+        .filter(move |c| !overridden(c, generate))
+}
+
+/// A schema's generated composite types, once each, nested ones first.
+/// Two tables naming the same type contribute it once; a type nested in
+/// another is already listed before its holder within each model, and
+/// stays so.
+fn dedupe_composites(models: &[Model], generate: &Generate) -> Vec<PgComposite> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for model in models {
+        for c in generated_composites(model, generate) {
+            if seen.insert((c.schema.clone(), c.name.clone())) {
+                out.push(c.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Whether any table references an enum or composite type — decides if a
+/// schema run needs an `enums.rs` at all. The file keeps its name from
+/// when enums were the only type it held; the composites live there too.
+pub fn uses_types(models: &[Model]) -> bool {
+    models
+        .iter()
+        .any(|m| !m.enums.is_empty() || !m.composites.is_empty())
+}
+
+/// sqlx matches the type name the server reports. A type outside `public`
+/// is not on the default `search_path`, so the server names it with its
+/// schema and the attribute has to as well — without this a column of the
+/// type fails to decode at run time, which compiling never catches.
+fn sqlx_type_name(schema: &str, name: &str) -> String {
+    if schema == "public" {
+        name.to_string()
+    } else {
+        format!("{schema}.{name}")
+    }
 }

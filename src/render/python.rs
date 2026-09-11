@@ -11,6 +11,7 @@
 //! path cannot.
 
 use super::{Opts, header};
+use crate::config::Generate;
 use crate::introspect::Model;
 use crate::naming;
 use crate::render;
@@ -41,14 +42,14 @@ pub fn pymodule_file(name: &str, groups: &[Group], opts: &Opts) -> String {
     code.push_str("use pyo3::prelude::*;\n\n");
 
     match groups {
-        [only] => code.push_str(&flat(name, only, opts.inputs)),
-        many => code.push_str(&nested(name, many, opts.inputs)),
+        [only] => code.push_str(&flat(name, only, opts)),
+        many => code.push_str(&nested(name, many, opts)),
     }
     code
 }
 
-fn flat(name: &str, group: &Group, inputs: bool) -> String {
-    let classes = registrations(group, "m", 4, inputs);
+fn flat(name: &str, group: &Group, opts: &Opts) -> String {
+    let classes = registrations(group, "m", 4, opts);
     format!(
         r#"/// Register every generated class in `{}` on a module.
 ///
@@ -72,7 +73,7 @@ pub fn {name}(m: &Bound<'_, PyModule>) -> PyResult<()> {{
     )
 }
 
-fn nested(name: &str, groups: &[Group], inputs: bool) -> String {
+fn nested(name: &str, groups: &[Group], opts: &Opts) -> String {
     let calls: String = groups
         .iter()
         .map(|g| format!("    {}(m)?;\n", naming::ident(&g.schema)))
@@ -103,7 +104,7 @@ pub fn {name}(m: &Bound<'_, PyModule>) -> PyResult<()> {{
     for group in groups {
         let module = naming::ident(&group.schema);
         let schema = &group.schema;
-        let classes = registrations(group, "child", 4, inputs);
+        let classes = registrations(group, "child", 4, opts);
         code.push_str(&format!(
             r#"
 /// The `{schema}` schema.
@@ -129,16 +130,20 @@ fn {module}(parent: &Bound<'_, PyModule>) -> PyResult<()> {{
 
 /// `m.add_class::<super::item::Item>()?;` for every class in a group.
 ///
-/// Enums come first: a struct field is typed by one, and reading the
-/// registrations in that order matches how the types depend on each
-/// other. With `inputs`, each writable table's `New…` follows its row.
-fn registrations(group: &Group, target: &str, by: usize, inputs: bool) -> String {
+/// Enums come first, then composites, then the row structs: a field is
+/// typed by what precedes it, and reading the registrations in that
+/// order matches how the types depend on each other. With
+/// [`Opts::inputs`], each writable table's `New…` follows its row. A
+/// composite the config overrides is the crate's class, not proto's, and
+/// is not registered.
+fn registrations(group: &Group, target: &str, by: usize, opts: &Opts) -> String {
     let pad = " ".repeat(by);
     let path = &group.path;
+    let inputs = opts.inputs;
     let mut out = String::new();
 
-    if render::uses_enums(group.models) {
-        for e in dedupe(group.models) {
+    if render::uses_types(group.models) {
+        for e in dedupe(group.models, opts.generate) {
             let name = naming::pascal_case(&e);
             out.push_str(&format!(
                 "{pad}{target}.add_class::<{path}::enums::{name}>()?;\n"
@@ -316,12 +321,21 @@ fn {module}(parent: &Bound<'_, PyModule>) -> PyResult<()> {{
     )
 }
 
-fn dedupe(models: &[Model]) -> Vec<String> {
+/// The names of every type filed in `enums.rs`: enums, then the
+/// composites proto generates.
+fn dedupe(models: &[Model], generate: &Generate) -> Vec<String> {
     let mut seen = Vec::new();
     for model in models {
         for e in &model.enums {
             if !seen.contains(&e.name) {
                 seen.push(e.name.clone());
+            }
+        }
+    }
+    for model in models {
+        for c in render::generated_composites(model, generate) {
+            if !seen.contains(&c.name) {
+                seen.push(c.name.clone());
             }
         }
     }
@@ -394,6 +408,52 @@ mod tests {
         // Full paths, so two schemas may hold the same table name.
         assert!(out.contains("super::shop::product::Product"), "{out}");
         assert!(out.contains("super::warehouse::order::Order"), "{out}");
+    }
+
+    /// A composite is a model-side class: it registers with the enums
+    /// on its own schema's submodule, ahead of the rows that hold it,
+    /// and never on the mapper bridge.
+    #[test]
+    fn composites_register_with_the_enums_on_their_own_schema() {
+        let generate = Generate::default();
+        let opts = fixture::opts(&generate, Strategy::Embedded);
+        let shop = [fixture::sized_product()];
+        let odd = [fixture::awkward()];
+        let groups = [
+            group("shop", "super::shop", &shop),
+            group("warehouse", "super::warehouse", &odd),
+        ];
+        let out = pymodule_file("store", &groups, &opts);
+
+        let span = out
+            .find("child.add_class::<super::shop::enums::Span>()?;")
+            .expect("nested composite registered");
+        let dims = out
+            .find("child.add_class::<super::shop::enums::Dimensions>()?;")
+            .expect("composite registered");
+        let row = out
+            .find("child.add_class::<super::shop::product::Product>()?;")
+            .expect("row registered");
+        assert!(span < row && dims < row, "{out}");
+        // The other schema has no types of its own to register.
+        assert!(!out.contains("super::warehouse::enums::"), "{out}");
+
+        let bridge = bridge_file(&groups, &opts);
+        assert!(!bridge.contains("Dimensions"), "{bridge}");
+        assert!(!bridge.contains("enums::"), "{bridge}");
+
+        // Overridden, the class is the crate's to register, not proto's.
+        let mut generate = Generate::default();
+        generate
+            .types
+            .insert("dimensions".into(), "my_crate::Dimensions".into());
+        let opts = fixture::opts(&generate, Strategy::Embedded);
+        let out = pymodule_file("store", &groups, &opts);
+        assert!(!out.contains("Dimensions"), "{out}");
+        assert!(
+            out.contains("child.add_class::<super::shop::enums::Span>()?;"),
+            "{out}"
+        );
     }
 
     #[test]

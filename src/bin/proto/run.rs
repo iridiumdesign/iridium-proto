@@ -468,11 +468,14 @@ fn write_schema(
     no_mod: bool,
     force: bool,
 ) -> Result<()> {
-    let enum_path = render::uses_enums(models).then_some("super::enums");
+    let enum_path = render::uses_types(models).then_some("super::enums");
 
     let mut modules = Vec::new();
     if enum_path.is_some() {
         let rendered = render::model::enums_file(models, schema, opts);
+        for warning in &rendered.warnings {
+            output::warn(warning);
+        }
         journal.write(&dir.join("enums.rs"), &rendered.code, force)?;
         modules.push("enums".to_string());
     }

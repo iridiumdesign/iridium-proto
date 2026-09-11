@@ -69,6 +69,8 @@ pub struct Generate {
     pub derives: Vec<String>,
     /// Derives on the Rust enums behind Postgres enum types.
     pub enum_derives: Vec<String>,
+    /// Derives on the Rust structs behind Postgres composite types.
+    pub composite_derives: Vec<String>,
     /// Derives for the `New…` insert input types.
     pub input_derives: Vec<String>,
     /// Cargo feature that gates the pyo3 attributes.
@@ -149,6 +151,16 @@ impl Default for Generate {
                 "Copy",
                 "PartialEq",
                 "Eq",
+                "Serialize",
+                "Deserialize",
+            ]
+            .map(String::from)
+            .to_vec(),
+            composite_derives: [
+                "sqlx::Type",
+                "Debug",
+                "Clone",
+                "PartialEq",
                 "Serialize",
                 "Deserialize",
             ]
