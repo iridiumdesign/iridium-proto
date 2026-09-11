@@ -118,6 +118,7 @@ const KNOWN: [&str; 4] = ["chrono", "uuid", "rust_decimal", "serde_json"];
 ///         primary_key: vec!["id".into()],
 ///         unique_keys: vec![],
 ///         foreign_keys: vec![],
+///         children: vec![],
 ///     },
 ///     enums: vec![],
 /// };

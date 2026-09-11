@@ -56,7 +56,15 @@ pub fn reconcile(existing: &str, rendered: &str) -> Option<String> {
             // Already here, in some form: correct it in place.
             Some(have) => match (have, want) {
                 (syn::Item::Struct(have), syn::Item::Struct(want)) => {
-                    fields(have, want, &offsets, existing, &mut edits);
+                    fields(
+                        have,
+                        want,
+                        &offsets,
+                        existing,
+                        rendered,
+                        &rendered_offsets,
+                        &mut edits,
+                    );
                 }
                 (syn::Item::Impl(have), syn::Item::Impl(want)) => {
                     methods(
@@ -91,19 +99,107 @@ pub fn reconcile(existing: &str, rendered: &str) -> Option<String> {
         }
     }
 
+    // A `pub mod x;` line for a module the render no longer declares —
+    // a table that was pruned — is taken back, or the crate fails to
+    // find the file. Only the bare declaration: a module with a body is
+    // somebody's code.
+    for item in &old.items {
+        let syn::Item::Mod(module) = item else {
+            continue;
+        };
+        if module.content.is_some() || new.items.iter().any(|want| same(want, item)) {
+            continue;
+        }
+        let (start, end) = span_of(item, &offsets);
+        edits.push(Edit {
+            start: line_start(existing, start),
+            end: (line_end(existing, end) + 1).min(existing.len()),
+            text: String::new(),
+        });
+    }
+
     let mut out = apply(existing, edits);
     if !appended.is_empty() {
         out.push_str(&appended);
     }
+
+    // An import proto wrote for a sibling model's type, that the render
+    // no longer has and nothing else in the file uses, is taken back:
+    // left there it fails the consumer's `-D warnings`. One that is
+    // still used is somebody's, whatever the render says. Decided on the
+    // corrected text, once the field that used it is gone.
+    let wanted: std::collections::BTreeSet<String> = new.items.iter().filter_map(key).collect();
+    for item in &old.items {
+        let syn::Item::Use(import) = item else {
+            continue;
+        };
+        if wanted.contains(&key(item).unwrap_or_default()) {
+            continue;
+        }
+        let Some(leaf) = sibling_import(import) else {
+            continue;
+        };
+        if uses_of(&out, &leaf) > 1 {
+            continue;
+        }
+        let (start, end) = span_of(item, &offsets);
+        let from = line_start(existing, start);
+        let to = (line_end(existing, end) + 1).min(existing.len());
+        out = out.replacen(&existing[from..to], "", 1);
+    }
     Some(out)
 }
 
+/// The type a `use super::<module>::<Type>;` brings in — the shape of
+/// an import of a sibling model, which is the only kind proto writes
+/// with a `super` path — or `None` for any other import.
+fn sibling_import(item: &syn::ItemUse) -> Option<String> {
+    if !matches!(item.vis, syn::Visibility::Inherited) {
+        return None;
+    }
+    let syn::UseTree::Path(first) = &item.tree else {
+        return None;
+    };
+    if first.ident != "super" {
+        return None;
+    }
+    let syn::UseTree::Path(module) = &*first.tree else {
+        return None;
+    };
+    if module.ident == "enums" {
+        return None;
+    }
+    match &*module.tree {
+        syn::UseTree::Name(name) => Some(name.ident.to_string()),
+        _ => None,
+    }
+}
+
+/// How many times `word` appears in `source` as a whole identifier —
+/// the import line itself counts for one.
+fn uses_of(source: &str, word: &str) -> usize {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    source
+        .match_indices(word)
+        .filter(|(at, _)| !source[..*at].chars().next_back().is_some_and(is_ident))
+        .filter(|(at, _)| {
+            !source[at + word.len()..]
+                .chars()
+                .next()
+                .is_some_and(is_ident)
+        })
+        .count()
+}
+
 /// Reconcile one struct's fields: fix a type, add a column, drop one.
+#[allow(clippy::too_many_arguments)]
 fn fields(
     have: &syn::ItemStruct,
     want: &syn::ItemStruct,
     offsets: &Offsets,
     source: &str,
+    rendered: &str,
+    rendered_offsets: &Offsets,
     edits: &mut Vec<Edit>,
 ) {
     let name_of = |f: &syn::Field| {
@@ -186,11 +282,19 @@ fn fields(
             },
         };
 
-        additions.entry(at).or_default().push(format!(
-            "\n{indent}pub {}: {},",
-            field.ident.as_ref().unwrap(),
-            type_text(&field.ty)
-        ));
+        // The field as rendered, attributes and doc comment included: a
+        // `#[sqlx(rename)]` or `#[sqlx(skip)]` is part of what makes the
+        // field decode, not decoration. Re-indented to where it lands.
+        let text = &rendered
+            [rendered_offsets.of(field.span().start())..rendered_offsets.of(field.span().end())];
+        let lines: Vec<String> = text
+            .lines()
+            .map(|line| format!("\n{indent}{}", line.trim_start()))
+            .collect();
+        additions
+            .entry(at)
+            .or_default()
+            .push(format!("{},", lines.concat()));
     }
 
     for (at, lines) in additions {
@@ -269,9 +373,32 @@ fn methods(
         }
     }
 
+    // A method proto owned that the render no longer has — a finder for
+    // a constraint that is gone, a loader for a field that was renamed —
+    // is taken back, blank line and all. Only what carries the notice:
+    // a method somebody wrote lacks it, and is not proto's to remove.
+    let order: Vec<String> = want.items.iter().filter_map(name_of).collect();
+    for item in &have.items {
+        let Some(name) = name_of(item) else { continue };
+        if order.contains(&name) || !owned(item) {
+            continue;
+        }
+        let from = line_start(source, item_start(item, offsets));
+        let from = if source[..from].ends_with("\n\n") {
+            from - 1
+        } else {
+            from
+        };
+        let to = (line_end(source, offsets.of(item.span().end())) + 1).min(source.len());
+        edits.push(Edit {
+            start: from,
+            end: to,
+            text: String::new(),
+        });
+    }
+
     // A method the file does not have goes in after the last one it
     // does, so proto's stay together and nobody else's move.
-    let order: Vec<String> = want.items.iter().filter_map(name_of).collect();
     let mut additions: BTreeMap<usize, Vec<String>> = BTreeMap::new();
     for (index, name) in order.iter().enumerate() {
         if here.contains(name) {
@@ -313,6 +440,27 @@ fn methods(
             text: blocks.concat(),
         });
     }
+}
+
+/// Whether a method's doc comment carries proto's notice — the one
+/// [`crate::render::mapper`] closes every generated method with.
+fn owned(item: &syn::ImplItem) -> bool {
+    let syn::ImplItem::Fn(f) = item else {
+        return false;
+    };
+    f.attrs.iter().any(|attr| {
+        attr.path().is_ident("doc")
+            && matches!(
+                &attr.meta,
+                syn::Meta::NameValue(syn::MetaNameValue {
+                    value: syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(text),
+                        ..
+                    }),
+                    ..
+                }) if text.value().contains("proto owns this method")
+            )
+    })
 }
 
 // ── Text and positions ──────────────────────────────────────────────────────
@@ -511,6 +659,28 @@ pub struct Item {
         assert!(syn::parse_file(&out).is_ok(), "{out}");
     }
 
+    /// A field that is not a column only decodes because of what is
+    /// written above it, so a new one arrives with its attributes and
+    /// its doc comment, not just its declaration.
+    #[test]
+    fn a_new_field_arrives_with_its_attributes() {
+        let with_children = CORRECT.replace(
+            "    pub tags: Option<Vec<String>>,",
+            "    pub tags: Option<Vec<String>>,\n    /// Rows of `shop.variant`.\n    \
+             #[sqlx(skip)]\n    #[serde(default)]\n    pub children: Vec<Variant>,",
+        );
+        let out = reconcile(LIVED_IN, &with_children).expect("both parse");
+        assert!(
+            out.contains(
+                "    /// Rows of `shop.variant`.\n    #[sqlx(skip)]\n    #[serde(default)]\n    \
+                 pub children: Vec<Variant>,\n"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("// The tags come from the importer"), "{out}");
+        assert!(syn::parse_file(&out).is_ok(), "{out}");
+    }
+
     /// Column order in Postgres is a storage artifact — dropping and
     /// re-adding a column moves it to the end — and it means nothing to
     /// `FromRow`, which matches by name. So an existing field never
@@ -660,6 +830,127 @@ impl<'a> ItemMapper<'a> {
         assert!(out.contains("// Ours, not proto's"), "{out}");
         assert!(out.contains("pub async fn cheapest"), "{out}");
         assert!(out.contains("ORDER BY price LIMIT 1"), "{out}");
+        assert!(syn::parse_file(&out).is_ok(), "{out}");
+    }
+
+    /// A mapper holding a method proto owned for a field that has since
+    /// been renamed, beside one somebody wrote.
+    const STALE: &str = r#"// @generated by proto 0.1.0 — regenerate rather than rewrite.
+
+use sqlx::PgPool;
+
+impl<'a> BinMapper<'a> {
+    /// Look up the row identified by `id`.
+    ///
+    /// proto owns this method and rewrites it when the schema changes, so
+    /// edits here do not survive. Add a method of your own beside it.
+    pub async fn find_by_id(&self, id: Uuid) -> Result<Option<Bin>, sqlx::Error> {
+        sqlx::query_as("SELECT * FROM mp.bin WHERE id = $1")
+            .bind(id)
+            .fetch_optional(self.pool)
+            .await
+    }
+
+    /// Every `mp.item` row whose `bin_id` is this row's `id`, into `item`.
+    ///
+    /// proto owns this method and rewrites it when the schema changes, so
+    /// edits here do not survive. Add a method of your own beside it.
+    pub async fn load_item(&self, row: &mut Bin) -> Result<(), sqlx::Error> {
+        row.item = sqlx::query_as("SELECT * FROM mp.item WHERE bin_id = $1")
+            .bind(row.id)
+            .fetch_all(self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // Ours, not proto's — the schema does not imply this one.
+    pub async fn emptiest(&self) -> Result<Option<Bin>, sqlx::Error> {
+        sqlx::query_as("SELECT * FROM mp.bin ORDER BY fill LIMIT 1")
+            .fetch_optional(self.pool)
+            .await
+    }
+}
+"#;
+
+    /// The field was renamed, so the render has `load_children` where
+    /// the file has `load_item`. The old method referenced a field that
+    /// is gone and would not compile; it carries proto's notice, so it
+    /// is proto's to take back. The one without the notice is not.
+    #[test]
+    fn an_owned_method_the_render_no_longer_has_is_taken_back() {
+        let rendered = STALE
+            .replace("load_item", "load_children")
+            .replace("row.item =", "row.children =")
+            .replace("into `item`", "into `children`");
+        let rendered = rendered[..rendered.find("    // Ours, not proto's").unwrap()]
+            .trim_end()
+            .to_string()
+            + "\n}\n";
+
+        let out = reconcile(STALE, &rendered).expect("both parse");
+
+        assert!(!out.contains("load_item"), "{out}");
+        assert!(!out.contains("row.item ="), "{out}");
+        assert!(out.contains("pub async fn load_children"), "{out}");
+        assert!(out.contains("pub async fn find_by_id"), "{out}");
+        // Theirs stays, comment and all, and the block still parses.
+        assert!(out.contains("// Ours, not proto's"), "{out}");
+        assert!(out.contains("pub async fn emptiest"), "{out}");
+        assert!(syn::parse_file(&out).is_ok(), "{out}");
+        // No doubled blank lines where the method used to be.
+        assert!(!out.contains("\n\n\n"), "{out}");
+    }
+
+    /// A struct whose children field went away takes its import with
+    /// it — but only when nothing else in the file names the type.
+    #[test]
+    fn a_sibling_import_nothing_uses_any_more_is_taken_back() {
+        let with_children = r#"// @generated by proto 0.1.0 — regenerate rather than rewrite.
+
+use super::item::Item;
+use uuid::Uuid;
+
+pub struct Bin {
+    pub id: Uuid,
+    #[sqlx(skip)]
+    pub item: Vec<Item>,
+}
+"#;
+        let without = r#"// @generated by proto 0.1.0 — regenerate rather than rewrite.
+
+use uuid::Uuid;
+
+pub struct Bin {
+    pub id: Uuid,
+}
+"#;
+        let out = reconcile(with_children, without).expect("both parse");
+        assert!(!out.contains("use super::item::Item;"), "{out}");
+        assert!(!out.contains("pub item:"), "{out}");
+        assert!(out.contains("use uuid::Uuid;"), "{out}");
+        assert!(syn::parse_file(&out).is_ok(), "{out}");
+
+        // Somebody's own code names the type: the import is theirs now.
+        let in_use = with_children.to_string()
+            + "\nimpl Bin {\n    pub fn first(&self) -> Option<&Item> {\n        None\n    }\n}\n";
+        let out = reconcile(&in_use, without).expect("both parse");
+        assert!(out.contains("use super::item::Item;"), "{out}");
+        assert!(out.contains("Option<&Item>"), "{out}");
+        assert!(syn::parse_file(&out).is_ok(), "{out}");
+    }
+
+    /// A pruned table's module goes out of `mod.rs`, or the crate cannot
+    /// find its file. A module with a body is not a declaration proto
+    /// makes, and stays.
+    #[test]
+    fn a_module_the_render_no_longer_declares_is_taken_back() {
+        let old = "// @generated by proto 0.1.0\npub mod bin;\npub mod item;\npub mod order;\n\n\
+                   pub mod extra {\n    pub fn helper() {}\n}\n";
+        let new = "// @generated by proto 0.1.0\npub mod bin;\npub mod item;\n";
+        let out = reconcile(old, new).expect("both parse");
+        assert!(!out.contains("pub mod order;"), "{out}");
+        assert!(out.contains("pub mod bin;\npub mod item;\n"), "{out}");
+        assert!(out.contains("pub mod extra {"), "{out}");
         assert!(syn::parse_file(&out).is_ok(), "{out}");
     }
 

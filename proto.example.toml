@@ -40,6 +40,19 @@ exclude_schemas = ["information_schema", "pg_catalog", "pg_toast"]
 # this for a run.
 # manifest = true
 
+# The field a parent struct holds its child rows in, when exactly one
+# table refers to it. With several, each field is named after its child
+# table. "" generates no children fields at all.
+children_field = "children"
+
+# Per-parent overrides, keyed schema.table or table: one name for a
+# parent with one child table, or a name per child table (or per
+# table.column, when the same child refers to the parent twice).
+# [generate.relations."shop.product"]
+# children = "variants"
+# [generate.relations."shop.category"]
+# children = { category = "subcategories", product = "products" }
+
 # Where `--sql server` writes its migrations, and what it calls them.
 # --migrations-dir beats the directory for a run. The name is a pattern:
 # {version} is YYYYMMDDNNN, {date} and {seq} are its halves, {slug} is

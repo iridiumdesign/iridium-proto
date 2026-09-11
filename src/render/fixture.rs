@@ -1,10 +1,11 @@
 //! A hand-built table for the renderer tests, so they do not need a
 //! database. `shop.product` covers the cases that decide output: a
 //! server-owned key, a literal default, a unique column, a foreign key, an
-//! enum type, and a nullable column.
+//! enum type, a nullable column, and a child table (`shop.variant`)
+//! pointing back at it. `shop.category` is a tree.
 
 use crate::config::Generate;
-use crate::introspect::{Column, ForeignKey, Model, PgEnum, PgType, RelKind, Table};
+use crate::introspect::{Child, Column, ForeignKey, Model, PgEnum, PgType, RelKind, Table};
 
 use super::{Opts, Strategy};
 
@@ -75,6 +76,14 @@ pub fn product() -> Model {
                 ref_schema: "shop".into(),
                 ref_table: "organization".into(),
             }],
+            children: vec![Child {
+                schema: "shop".into(),
+                table: "variant".into(),
+                column: "product_id".into(),
+                ref_column: "id".into(),
+                primary_key: vec!["id".into()],
+                unique_keys: Vec::new(),
+            }],
         },
         enums: vec![PgEnum {
             schema: "shop".into(),
@@ -127,6 +136,44 @@ pub fn awkward() -> Model {
             primary_key: vec!["id".into()],
             unique_keys: vec![vec!["select".into()]],
             foreign_keys: Vec::new(),
+            children: Vec::new(),
+        },
+        enums: Vec::new(),
+    }
+}
+
+/// A tree: `category.parent_id` refers to `category.id`.
+pub fn category() -> Model {
+    let columns = vec![
+        with_default(
+            column("id", PgType::Scalar("uuid".into()), "uuid", true),
+            "gen_random_uuid()",
+        ),
+        column("name", PgType::Scalar("text".into()), "text", true),
+        column("parent_id", PgType::Scalar("uuid".into()), "uuid", false),
+    ];
+    Model {
+        table: Table {
+            schema: "shop".into(),
+            name: "category".into(),
+            kind: RelKind::Table,
+            comment: None,
+            columns,
+            primary_key: vec!["id".into()],
+            unique_keys: Vec::new(),
+            foreign_keys: vec![ForeignKey {
+                columns: vec!["parent_id".into()],
+                ref_schema: "shop".into(),
+                ref_table: "category".into(),
+            }],
+            children: vec![Child {
+                schema: "shop".into(),
+                table: "category".into(),
+                column: "parent_id".into(),
+                ref_column: "id".into(),
+                primary_key: vec!["id".into()],
+                unique_keys: Vec::new(),
+            }],
         },
         enums: Vec::new(),
     }

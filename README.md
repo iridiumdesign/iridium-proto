@@ -415,6 +415,69 @@ not be edited. Each file opens by dropping exactly the functions it
 defines, by name and whatever signature, so a regenerated set replaces
 the old one instead of overloading it.
 
+## Children
+
+A single-column foreign key gives the child a finder. The parent gets
+the other half: a field holding the child rows, and the methods that
+fill it.
+
+```rust
+/// Rows of `shop.variant` whose `product_id` is this row's `id`. Not a
+/// column: `ProductMapper::load_children` fills it, and it is empty
+/// until then.
+#[sqlx(skip)]
+#[serde(default)]
+pub children: Vec<Variant>,
+```
+
+```rust
+let products = ProductMapper::new(&pool);
+let mut one = products.find_by_id(id).await?.unwrap();
+products.load_children(&mut one).await?;            // fills one.children
+let same = products.find_by_id_with_children(id).await?;
+```
+
+One level: the children's own children are not loaded. A table that
+refers to itself — `category.parent_id` to `category.id` — is the
+common tree, and holds `children: Vec<Category>` like any other parent.
+
+The field is `children` when exactly one table refers to the parent,
+which is what most schemas look like; `children_field` in the config
+renames it. A parent with several child tables names each field after
+its child table (`variant`, `review`), or after the table and column
+when the same child refers to it twice (`link_by_from_id`). Both can be
+overridden per parent, which also pins a name so a second child table
+arriving later cannot rename the first:
+
+```toml
+[generate]
+children_field = "children"
+
+[generate.relations."shop.product"]
+children = "variants"                      # one child table
+
+[generate.relations."shop.category"]
+children = { category = "subcategories", product = "products" }
+```
+
+`children_field = ""` generates no children fields at all.
+
+Under `--sql server` the parent's mapper calls the child's own finder
+function, so nothing new is needed on the server. That function is
+written by the *child's* migration, when the child's mapper is
+generated: a schema or database run writes both, and a parent generated
+on its own with `proto mapper` expects the child's to exist. A
+one-to-one link, where the referring column is itself unique, is not a
+collection and gets no field. A field that would collide — with a
+column called `children`, say, or a child table named `date_time` whose
+`DateTime` shadows `chrono`'s — is skipped with a warning that says how
+to rename it. When a field goes away or is renamed, the methods that
+filled it and the import it needed go with it; regenerating leaves no
+stale loader behind. Neither does a child in another schema,
+or one excluded by `exclude_tables`: its type would not be there to
+name. A single `proto model` run imports the child's type from the
+sibling module `super::<child>`, the layout `--out-dir` writes.
+
 ## Type mapping
 
 | Postgres | Rust |

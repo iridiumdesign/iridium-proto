@@ -8,6 +8,7 @@
 
 use std::collections::BTreeSet;
 
+use super::children::{self, ChildField};
 use super::plan::{self, Kind, Operation};
 use super::{Opts, Rendered, Strategy, column_list, escape, header, import_block, indent};
 use crate::introspect::{Column, Model, Table};
@@ -61,6 +62,13 @@ pub fn mapper_file(model: &Model, opts: &Opts) -> Rendered {
             4,
         ));
     }
+    let mut warnings = Vec::new();
+    for child in &children::of(table, opts.generate).fields {
+        methods.push_str(&indent(
+            &child_methods(table, opts, child, &row, &ops, &mut imports, &mut warnings),
+            4,
+        ));
+    }
 
     let mut code = header(
         opts,
@@ -88,10 +96,7 @@ impl<'a> {row}Mapper<'a> {{
     code.push_str(&methods);
     code.push_str("}\n");
 
-    Rendered {
-        code,
-        warnings: Vec::new(),
-    }
+    Rendered { code, warnings }
 }
 
 fn method(
@@ -201,6 +206,108 @@ fn method(
 "#
         ),
     }
+}
+
+/// The methods that fill one children field: `load_<field>` on a row
+/// already in hand, and `find_by_id_with_<field>` when the table has a
+/// key to find one by. The child's rows come from the child's own
+/// statement — under [`Strategy::Server`], the finder function the
+/// child's migration defines — so nothing new is needed on the server
+/// for the parent to have its children. The wrapper is skipped, with a
+/// warning, when a column happens to give a planned finder its name.
+#[allow(clippy::too_many_arguments)]
+fn child_methods(
+    table: &Table,
+    opts: &Opts,
+    child: &ChildField,
+    row: &str,
+    ops: &[Operation],
+    imports: &mut BTreeSet<String>,
+    warnings: &mut Vec<String>,
+) -> String {
+    // The child's type is never named: the field it is assigned to
+    // carries it, and an import would only sit unused.
+    let (field, stem) = (&child.field, &child.stem);
+    let (c_schema, c_table, c_column) =
+        (&child.child.schema, &child.child.table, &child.child.column);
+    let function = quoting::qualified(c_schema, &format!("{c_table}_{}", child.call));
+
+    let sql = escape(&match opts.strategy {
+        Strategy::Server => format!("SELECT * FROM {function}($1)"),
+        Strategy::Embedded => format!(
+            "SELECT * FROM {} WHERE {} = $1",
+            quoting::qualified(c_schema, c_table),
+            quoting::ident(c_column)
+        ),
+    });
+    // The parent's referenced column, bound the way its type wants.
+    let by_ref = table
+        .column(&child.child.ref_column)
+        .is_some_and(|c| !typemap::map(&c.ty, opts.generate).copy);
+    let by_ref = if by_ref { "&" } else { "" };
+    let ref_field = naming::ident(&child.child.ref_column);
+
+    // The function is the child's, written by the child's migration.
+    // A parent generated on its own has no way to write it.
+    let server_note = match opts.strategy {
+        Strategy::Server => format!(
+            "/// Calls `{function}`, which the migration for\n\
+             /// `{c_schema}.{c_table}` defines: generate that mapper first.\n"
+        ),
+        Strategy::Embedded => String::new(),
+    };
+
+    let mut out = format!(
+        r#"
+/// Every `{c_schema}.{c_table}` row whose `{c_column}` is this row's
+/// `{}`, into `{field}`. One level: the children's own children
+/// are not loaded.
+{server_note}{OWNED}pub async fn load_{stem}(&self, row: &mut {row}) -> Result<(), sqlx::Error> {{
+    row.{field} = sqlx::query_as("{sql}")
+        .bind({by_ref}row.{ref_field})
+        .fetch_all(self.pool)
+        .await?;
+    Ok(())
+}}
+"#,
+        child.child.ref_column
+    );
+
+    let key = ops.iter().find(|op| op.call == "get");
+    if let Some(key) = key {
+        let wrapper = format!("{}_with_{stem}", key.method);
+        if ops.iter().any(|op| op.method == wrapper) {
+            warnings.push(format!(
+                "{}.{}: a column already gives a finder the name `{wrapper}`, \
+                 so `{field}` gets `load_{stem}` and no finder of its own",
+                table.schema, table.name
+            ));
+            return out;
+        }
+        let (params, _) = arguments(&key.columns, opts, imports);
+        let args = key
+            .columns
+            .iter()
+            .map(|c| naming::ident(&c.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let finder = &key.method;
+        out.push_str(&format!(
+            r#"
+/// `{finder}`, with `{field}` loaded.
+{OWNED}pub async fn {finder}_with_{stem}(&self{params}) -> Result<Option<{row}>, sqlx::Error> {{
+    match self.{finder}({args}).await? {{
+        Some(mut row) => {{
+            self.load_{stem}(&mut row).await?;
+            Ok(Some(row))
+        }}
+        None => Ok(None),
+    }}
+}}
+"#
+        ));
+    }
+    out
 }
 
 // ── SQL ─────────────────────────────────────────────────────────────────────
@@ -448,6 +555,92 @@ mod tests {
             out.contains("pub async fn find_by_org_id(&self, org_id: Uuid) -> Result<Vec<Product>"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn a_parent_can_load_its_children() {
+        let out = render(Strategy::Embedded);
+        // The field's type carries the child's; naming it here would
+        // only be an unused import in the crate this lands in.
+        assert!(!out.contains("variant::Variant"), "{out}");
+        assert!(
+            out.contains(
+                "pub async fn load_children(&self, row: &mut Product) -> Result<(), sqlx::Error>"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("SELECT * FROM shop.variant WHERE product_id = $1"),
+            "{out}"
+        );
+        // The key is Copy, so it binds by value.
+        assert!(out.contains(".bind(row.id)"), "{out}");
+        assert!(
+            out.contains(
+                "pub async fn find_by_id_with_children(&self, id: Uuid) -> \
+                 Result<Option<Product>, sqlx::Error>"
+            ),
+            "{out}"
+        );
+
+        // On the server, the child's own finder function does the work,
+        // so the parent needs nothing new in its migration — and the
+        // method says whose migration writes it.
+        let server = render(Strategy::Server);
+        assert!(
+            server.contains("SELECT * FROM shop.variant_by_product_id($1)"),
+            "{server}"
+        );
+        assert!(
+            server.contains("/// Calls `shop.variant_by_product_id`, which the migration for"),
+            "{server}"
+        );
+        assert!(!out.contains("which the migration for"), "{out}");
+    }
+
+    /// A column named `id_with_children` would plan a finder called
+    /// `find_by_id_with_children`. The loader still comes; the wrapper
+    /// that would collide with it does not, and the run is told.
+    #[test]
+    fn a_wrapper_that_would_shadow_a_finder_is_skipped_and_said() {
+        let mut model = fixture::product();
+        model.table.columns.push(fixture::column(
+            "id_with_children",
+            crate::introspect::PgType::Scalar("text".into()),
+            "text",
+            true,
+        ));
+        model
+            .table
+            .unique_keys
+            .push(vec!["id_with_children".into()]);
+        let generate = Generate::default();
+        let rendered = mapper_file(&model, &fixture::opts(&generate, Strategy::Embedded));
+        let out = rendered.code;
+        assert!(out.contains("pub async fn load_children"), "{out}");
+        assert_eq!(
+            out.matches("pub async fn find_by_id_with_children").count(),
+            1
+        );
+        assert!(
+            out.contains("find_by_id_with_children(&self, id_with_children: &str)"),
+            "{out}"
+        );
+        assert_eq!(rendered.warnings.len(), 1, "{:?}", rendered.warnings);
+        assert!(syn::parse_file(&out).is_ok(), "{out}");
+    }
+
+    #[test]
+    fn a_tree_loads_its_own_kind() {
+        let generate = Generate::default();
+        let opts = fixture::opts(&generate, Strategy::Embedded);
+        let out = mapper_file(&fixture::category(), &opts).code;
+        assert!(out.contains("row: &mut Category"), "{out}");
+        assert!(
+            out.contains("SELECT * FROM shop.category WHERE parent_id = $1"),
+            "{out}"
+        );
+        assert!(syn::parse_file(&out).is_ok(), "{out}");
     }
 
     #[test]

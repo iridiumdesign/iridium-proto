@@ -138,6 +138,9 @@ pub struct Table {
     pub unique_keys: Vec<Vec<String>>,
     /// Foreign key constraints, in constraint order.
     pub foreign_keys: Vec<ForeignKey>,
+    /// Tables whose single-column foreign keys point here, in constraint
+    /// order. The parent's side of the relationship.
+    pub children: Vec<Child>,
 }
 
 /// A foreign key constraint. Single-column ones become finders.
@@ -149,6 +152,26 @@ pub struct ForeignKey {
     pub ref_schema: String,
     /// The referenced relation.
     pub ref_table: String,
+}
+
+/// A table that refers to this one through a single-column foreign key.
+/// One-to-one links — where the referring column is itself unique — are
+/// not here: they are not a collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Child {
+    /// Schema of the referring table.
+    pub schema: String,
+    /// The referring table.
+    pub table: String,
+    /// Its foreign key column.
+    pub column: String,
+    /// The column here that it refers to — the primary key, nearly always.
+    pub ref_column: String,
+    /// The child's own primary key, for naming the finder the parent's
+    /// loader calls; see [`crate::render::plan::finder_call`].
+    pub primary_key: Vec<String>,
+    /// The child's unique keys, likewise.
+    pub unique_keys: Vec<Vec<String>>,
 }
 
 impl Table {
@@ -301,6 +324,37 @@ SELECT array_agg(a.attname::text ORDER BY k.ord) AS cols,
  GROUP BY c.oid, rn.nspname, rt.relname
  ORDER BY c.oid";
 
+// The other side of FOREIGN_KEY_SQL: every single-column foreign key
+// that points at this table. A referring column that is itself unique
+// makes a one-to-one, which is not a collection, so it is left out. Only
+// the key part of an index decides that: INCLUDE columns follow the key
+// in indkey and do not make it any less unique on the column.
+const CHILDREN_SQL: &str = "\
+SELECT n.nspname::text  AS schema,
+       t.relname::text  AS table,
+       a.attname::text  AS column,
+       ra.attname::text AS ref_column
+  FROM pg_constraint c
+  JOIN pg_class t       ON t.oid = c.conrelid
+  JOIN pg_namespace n   ON n.oid = t.relnamespace
+  JOIN pg_class rt      ON rt.oid = c.confrelid
+  JOIN pg_namespace rn  ON rn.oid = rt.relnamespace
+  JOIN pg_attribute a   ON a.attrelid = t.oid AND a.attnum = c.conkey[1]
+  JOIN pg_attribute ra  ON ra.attrelid = rt.oid AND ra.attnum = c.confkey[1]
+ WHERE rn.nspname = $1
+   AND rt.relname = $2
+   AND c.contype = 'f'
+   AND array_length(c.conkey, 1) = 1
+   AND NOT EXISTS (
+       SELECT 1 FROM pg_index i
+        WHERE i.indrelid = t.oid
+          AND i.indisunique
+          AND i.indpred IS NULL
+          AND i.indexprs IS NULL
+          AND i.indnkeyatts = 1
+          AND i.indkey[0] = c.conkey[1])
+ ORDER BY c.oid";
+
 const ENUM_SQL: &str = "\
 SELECT e.enumlabel::text AS label
   FROM pg_enum e
@@ -365,7 +419,8 @@ async fn schema_exists(pool: &PgPool, schema: &str) -> Result<bool> {
 }
 
 /// Read one relation: its columns, comments, key, unique keys, foreign
-/// keys, and the enum types its columns use.
+/// keys, the tables whose foreign keys point at it, and the enum types
+/// its columns use.
 ///
 /// # Errors
 ///
@@ -409,17 +464,7 @@ pub async fn model(pool: &PgPool, schema: &str, table: &str) -> Result<Model> {
         });
     }
 
-    let pk = sqlx::query(PRIMARY_KEY_SQL)
-        .bind(schema)
-        .bind(table)
-        .fetch_all(pool)
-        .await?;
-
-    let uniques = sqlx::query(UNIQUE_SQL)
-        .bind(schema)
-        .bind(table)
-        .fetch_all(pool)
-        .await?;
+    let (primary_key, unique_keys) = read_keys(pool, schema, table).await?;
 
     let fks = sqlx::query(FOREIGN_KEY_SQL)
         .bind(schema)
@@ -427,17 +472,34 @@ pub async fn model(pool: &PgPool, schema: &str, table: &str) -> Result<Model> {
         .fetch_all(pool)
         .await?;
 
+    let mut children = Vec::new();
+    for row in sqlx::query(CHILDREN_SQL)
+        .bind(schema)
+        .bind(table)
+        .fetch_all(pool)
+        .await?
+    {
+        let (child_schema, child_table): (String, String) = (row.get("schema"), row.get("table"));
+        // The child's keys name the finder the parent's loader calls.
+        let (primary_key, unique_keys) = read_keys(pool, &child_schema, &child_table).await?;
+        children.push(Child {
+            schema: child_schema,
+            table: child_table,
+            column: row.get("column"),
+            ref_column: row.get("ref_column"),
+            primary_key,
+            unique_keys,
+        });
+    }
+
     let table = Table {
         schema: schema.to_string(),
         name: table.to_string(),
         kind,
         comment: relation.get("comment"),
         columns,
-        primary_key: pk.iter().map(|r| r.get::<String, _>("name")).collect(),
-        unique_keys: uniques
-            .iter()
-            .map(|r| r.get::<Vec<String>, _>("cols"))
-            .collect(),
+        primary_key,
+        unique_keys,
         foreign_keys: fks
             .iter()
             .map(|r| ForeignKey {
@@ -446,6 +508,7 @@ pub async fn model(pool: &PgPool, schema: &str, table: &str) -> Result<Model> {
                 ref_table: r.get("ref_table"),
             })
             .collect(),
+        children,
     };
 
     let enums = read_enums(pool, &table).await?;
@@ -497,6 +560,31 @@ fn column_type(row: &sqlx::postgres::PgRow) -> PgType {
     }
 
     PgType::Scalar(row.get("type_name"))
+}
+
+/// A relation's primary key and its unique keys, in index order.
+async fn read_keys(
+    pool: &PgPool,
+    schema: &str,
+    table: &str,
+) -> Result<(Vec<String>, Vec<Vec<String>>)> {
+    let pk = sqlx::query(PRIMARY_KEY_SQL)
+        .bind(schema)
+        .bind(table)
+        .fetch_all(pool)
+        .await?;
+    let uniques = sqlx::query(UNIQUE_SQL)
+        .bind(schema)
+        .bind(table)
+        .fetch_all(pool)
+        .await?;
+    Ok((
+        pk.iter().map(|r| r.get::<String, _>("name")).collect(),
+        uniques
+            .iter()
+            .map(|r| r.get::<Vec<String>, _>("cols"))
+            .collect(),
+    ))
 }
 
 async fn read_enums(pool: &PgPool, table: &Table) -> Result<Vec<PgEnum>> {

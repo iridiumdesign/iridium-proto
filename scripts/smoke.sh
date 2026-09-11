@@ -91,6 +91,23 @@ CREATE TABLE $SCHEMA.item (
     bin_id     uuid NOT NULL REFERENCES $SCHEMA.bin(id),
     created_at timestamptz NOT NULL DEFAULT now()
 );
+-- A tree: the parent's side of a foreign key, pointing at itself. bin
+-- is the other shape, with two child tables (item and "order").
+CREATE TABLE $SCHEMA.category (
+    id        uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    name      text NOT NULL,
+    parent_id uuid REFERENCES $SCHEMA.category(id)
+);
+-- One-to-one: the referring column is unique, so item gets no children
+-- field for it. The index carries an INCLUDE column, which follows the
+-- key in pg_index.indkey and must not hide the fact that the key alone
+-- is the foreign key column.
+CREATE TABLE $SCHEMA.spec (
+    id      uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    item_id uuid NOT NULL REFERENCES $SCHEMA.item(id),
+    note    text
+);
+CREATE UNIQUE INDEX spec_item ON $SCHEMA.spec (item_id) INCLUDE (note);
 COMMENT ON TABLE $SCHEMA.item IS 'A thing on a shelf.';
 COMMENT ON COLUMN $SCHEMA.item.slug IS 'Stable external identifier.';
 
@@ -163,6 +180,13 @@ grep -q '^# Ours: the decode binary' "$WORK/Cargo.toml" || {
     exit 1
 }
 
+say "a one-to-one link is not a collection"
+if grep -q 'Vec<Spec>' "$WORK/src/model/item.rs"; then
+    echo "  item got a children field for a unique foreign key column" >&2
+    exit 1
+fi
+echo "  item holds no spec rows: the referring column is unique"
+
 say "compiling the generated crate, and linting it as hard as this one"
 printf 'pub mod mapper;\npub mod mapper_server;\npub mod model;\n' > "$WORK/src/lib.rs"
 # Generated code is held to the same bar as the code that writes it:
@@ -197,6 +221,7 @@ use sqlx::postgres::PgPoolOptions;
 use std::str::FromStr;
 
 use proto_smoke::model::bin::NewBin;
+use proto_smoke::model::category::NewCategory;
 use proto_smoke::model::item::{ItemStatus, NewItem};
 
 /// The same round trip through whichever mapper tree it is handed. Both
@@ -206,6 +231,7 @@ macro_rules! round_trip {
     (\$name:ident, \$module:ident) => {
         async fn \$name(pool: &sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
             use proto_smoke::\$module::bin::BinMapper;
+            use proto_smoke::\$module::category::CategoryMapper;
             use proto_smoke::\$module::item::ItemMapper;
 
             let tag = stringify!(\$name);
@@ -256,6 +282,36 @@ macro_rules! round_trip {
             assert_eq!(items.find_by_bin_id(bin.id).await?.len(), 1);
             assert!(items.list().await?.iter().any(|i| i.id == made.id));
 
+            // The parent's side of the foreign key: bin has two child
+            // tables, so each field is named after its table.
+            let bins = BinMapper::new(pool);
+            let mut held = bins.find_by_id(bin.id).await?.expect("the bin");
+            assert!(held.item.is_empty(), "nothing loaded until asked");
+            bins.load_item(&mut held).await?;
+            assert_eq!(held.item.len(), 1, "the one item left in it");
+            assert_eq!(held.item[0].id, made.id);
+            let with = bins.find_by_id_with_item(bin.id).await?.expect("the bin");
+            assert_eq!(with.item.len(), 1);
+            assert!(with.order.is_empty(), "the other child table, unloaded");
+
+            // A tree: one table, both sides. One level only.
+            let categories = CategoryMapper::new(pool);
+            let root = categories
+                .create(&NewCategory { name: format!("root-{tag}"), parent_id: None })
+                .await?;
+            let leaf = categories
+                .create(&NewCategory { name: format!("leaf-{tag}"), parent_id: Some(root.id) })
+                .await?;
+            let tree = categories
+                .find_by_id_with_children(root.id)
+                .await?
+                .expect("the root");
+            assert_eq!(tree.children.len(), 1);
+            assert_eq!(tree.children[0].id, leaf.id);
+            assert!(tree.children[0].children.is_empty(), "one level");
+            categories.delete(leaf.id).await?;
+            categories.delete(root.id).await?;
+
             // A full replace, addressed by the key.
             let mut changed = found;
             changed.name = "Renamed".to_string();
@@ -267,7 +323,7 @@ macro_rules! round_trip {
             items.delete(made.id).await?;
             assert!(items.find_by_id(made.id).await?.is_none());
 
-            println!("  {tag}: every column decoded, every method round tripped");
+            println!("  {tag}: every column decoded, every method round tripped, children loaded");
             Ok(())
         }
     };
@@ -538,6 +594,42 @@ psql -q -v ON_ERROR_STOP=1 -c "DROP TABLE $SCHEMA.\"order\" CASCADE;"
     exit 1
 }
 echo "  pruned the model, kept the hand-written file"
+
+say "a parent down to one child table: the field is renamed, cleanly"
+# bin held `item` and `order`; with order gone it holds `children`. The
+# old fields, the methods that filled them and the import order needed
+# have to go with it, or the crate stops compiling.
+"$PROTO" --db "$TARGET" --sql server --migrations-dir "$WORK/migrations" \
+    schema "$SCHEMA" --pyo3 --mappers --prune \
+    --out-dir "$WORK/src/model" --mapper-dir "$WORK/src/mapper_server" \
+    >/dev/null 2>&1
+grep -q "pub children: Vec<Item>," "$WORK/src/model/bin.rs" || {
+    echo "  the surviving child did not take the default name" >&2
+    exit 1
+}
+for gone in "pub item:" "pub order:" "order::Order"; do
+    if grep -q "$gone" "$WORK/src/model/bin.rs"; then
+        echo "  still in the model after the rename: $gone" >&2
+        exit 1
+    fi
+done
+for dir in mapper mapper_server; do
+    grep -q "pub async fn load_children" "$WORK/src/$dir/bin.rs" || {
+        echo "  $dir: the loader for the renamed field did not arrive" >&2
+        exit 1
+    }
+    for gone in "load_item" "load_order" "with_item" "with_order"; do
+        if grep -q "$gone" "$WORK/src/$dir/bin.rs"; then
+            echo "  $dir: a stale method survived the rename: $gone" >&2
+            exit 1
+        fi
+    done
+done
+(cd "$WORK" && cargo check --quiet --lib) || {
+    echo "  the tree does not compile after the rename" >&2
+    exit 1
+}
+echo "  renamed the field, took back the old loaders, and it compiles"
 
 say "regenerating: the migrations should be left alone"
 "$PROTO" --db "$TARGET" --sql server --migrations-dir "$WORK/migrations" \
