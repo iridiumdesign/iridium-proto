@@ -195,6 +195,20 @@ if grep -q 'Vec<Spec>' "$WORK/src/model/item.rs"; then
     exit 1
 fi
 echo "  item holds no spec rows: the referring column is unique"
+# The same index decides spec's own finder. INCLUDE columns follow the
+# key in pg_index.indkey and are not part of what makes a row unique, so
+# the finder takes the key alone.
+for tree in mapper mapper_server; do
+    grep -q 'pub async fn find_by_item_id(' "$WORK/src/$tree/spec.rs" || {
+        echo "  $tree/spec.rs lacks find_by_item_id" >&2
+        exit 1
+    }
+    if grep -q 'find_by_item_id_and_note' "$WORK/src/$tree/spec.rs"; then
+        echo "  $tree/spec.rs read the INCLUDE column as part of the key" >&2
+        exit 1
+    fi
+done
+echo "  spec finds by item_id alone: the INCLUDE column is not a key"
 
 say "checking the composite types were generated"
 for line in 'pub struct Span {' 'pub struct Dimensions {' \
