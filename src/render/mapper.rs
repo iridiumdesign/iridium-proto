@@ -54,7 +54,8 @@ pub fn mapper_file(model: &Model, opts: &Opts) -> Rendered {
         ));
     }
     let mut warnings = Vec::new();
-    for child in &children::of(table, opts.generate).fields {
+    let children = children::of(table, opts.generate);
+    for child in &children.fields {
         methods.push_str(&indent(
             &child_methods(table, opts, child, &row, &ops, &mut imports, &mut warnings),
             4,
@@ -87,7 +88,7 @@ impl<'a> {row}Mapper<'a> {{
     code.push_str(&methods);
     code.push_str("}\n");
     if opts.pyo3 {
-        code.push_str(&python_block(opts, &ops, &row, &input));
+        code.push_str(&python_block(opts, &ops, &children.fields, &row, &input));
     }
 
     Rendered { code, warnings }
@@ -102,7 +103,13 @@ impl<'a> {row}Mapper<'a> {{
 /// Everything here is behind the pyo3 feature, and every method carries
 /// the owned notice, so [`crate::reconcile`] treats the block exactly as
 /// it treats the Rust one above it.
-fn python_block(opts: &Opts, ops: &[Operation], row: &str, input: &str) -> String {
+fn python_block(
+    opts: &Opts,
+    ops: &[Operation],
+    children: &[ChildField],
+    row: &str,
+    input: &str,
+) -> String {
     let feature = &opts.generate.pyo3_feature;
     let bridge = &opts.bridge_path;
     let owned = indent(OWNED, 4);
@@ -110,6 +117,9 @@ fn python_block(opts: &Opts, ops: &[Operation], row: &str, input: &str) -> Strin
     let mut methods = String::new();
     for op in ops {
         methods.push_str(&indent(&python_method(op, opts, row, input), 4));
+    }
+    for child in children {
+        methods.push_str(&indent(&python_child_methods(child, ops, opts, row), 4));
     }
 
     format!(
@@ -196,6 +206,59 @@ fn python_method(op: &Operation, opts: &Opts, row: &str, input: &str) -> String 
 }}
 "#
     )
+}
+
+/// The children loaders for Python. Python has no `&mut`, so
+/// `load_<field>` hands back the row with the field filled rather than
+/// changing the one it was given; the `_with_<field>` finder wraps the
+/// Rust one as any other finder is wrapped. The same collision rule as
+/// [`child_methods`] decides whether the finder exists at all, so the
+/// two surfaces agree.
+fn python_child_methods(child: &ChildField, ops: &[Operation], opts: &Opts, row: &str) -> String {
+    let bridge = &opts.bridge_path;
+    let (field, stem) = (&child.field, &child.stem);
+    let (c_schema, c_table) = (&child.child.schema, &child.child.table);
+
+    let mut out = format!(
+        r#"
+/// The row with `{field}` loaded: every `{c_schema}.{c_table}` row that
+/// refers to it. Hands back a filled copy rather than changing the row
+/// it was given.
+{OWNED}fn load_{stem}(
+    &self,
+    py: pyo3::Python<'_>,
+    row: pyo3::PyRef<'_, {row}>,
+) -> pyo3::PyResult<{row}> {{
+    let db = self.db.get();
+    let mapper = {row}Mapper::new(&db.pool);
+    let mut row = (*row).clone();
+    {bridge}::run(db, py, async move {{
+        mapper.load_{stem}(&mut row).await?;
+        Ok(row)
+    }})
+}}
+"#
+    );
+
+    if let Some((key, wrapper)) = finder_wrapper(ops, stem) {
+        let (params, args) = python_arguments(&key.columns, opts);
+        let params: String = params.iter().map(|p| format!(",\n    {p}")).collect();
+        let finder = &key.method;
+        out.push_str(&format!(
+            r#"
+/// `{finder}`, with `{field}` loaded.
+{OWNED}fn {wrapper}(
+    &self,
+    py: pyo3::Python<'_>{params},
+) -> pyo3::PyResult<Option<{row}>> {{
+    let db = self.db.get();
+    let mapper = {row}Mapper::new(&db.pool);
+    {bridge}::run(db, py, mapper.{wrapper}({args}))
+}}
+"#
+        ));
+    }
+    out
 }
 
 /// Parameters as Python hands them over, and the expressions that pass
@@ -397,17 +460,15 @@ fn child_methods(
         child.child.ref_column
     );
 
-    let key = ops.iter().find(|op| op.call == "get");
-    if let Some(key) = key {
-        let wrapper = format!("{}_with_{stem}", key.method);
-        if ops.iter().any(|op| op.method == wrapper) {
+    if let Some(key) = ops.iter().find(|op| op.call == "get") {
+        let Some((_, wrapper)) = finder_wrapper(ops, stem) else {
             warnings.push(format!(
-                "{}.{}: a column already gives a finder the name `{wrapper}`, \
+                "{}.{}: a column already gives a finder the name `{}_with_{stem}`, \
                  so `{field}` gets `load_{stem}` and no finder of its own",
-                table.schema, table.name
+                table.schema, table.name, key.method
             ));
             return out;
-        }
+        };
         let (params, _) = arguments(&key.columns, opts, imports);
         let args = key
             .columns
@@ -419,7 +480,7 @@ fn child_methods(
         out.push_str(&format!(
             r#"
 /// `{finder}`, with `{field}` loaded.
-{OWNED}pub async fn {finder}_with_{stem}(&self{params}) -> Result<Option<{row}>, sqlx::Error> {{
+{OWNED}pub async fn {wrapper}(&self{params}) -> Result<Option<{row}>, sqlx::Error> {{
     match self.{finder}({args}).await? {{
         Some(mut row) => {{
             self.load_{stem}(&mut row).await?;
@@ -432,6 +493,19 @@ fn child_methods(
         ));
     }
     out
+}
+
+/// The key finder a child field gets a `_with_<stem>` wrapper on, and
+/// the wrapper's name — unless a column already claims that name, in
+/// which case there is no wrapper. Both the Rust and the Python surface
+/// ask this, so neither can have a finder the other lacks.
+fn finder_wrapper<'o, 't>(
+    ops: &'o [Operation<'t>],
+    stem: &str,
+) -> Option<(&'o Operation<'t>, String)> {
+    let key = ops.iter().find(|op| op.call == "get")?;
+    let wrapper = format!("{}_with_{stem}", key.method);
+    (!ops.iter().any(|op| op.method == wrapper)).then_some((key, wrapper))
 }
 
 // ── SQL ─────────────────────────────────────────────────────────────────────
@@ -850,6 +924,42 @@ mod tests {
     }
 
     #[test]
+    fn children_cross_to_python_as_a_loader_and_a_finder() {
+        let out = render_python(Strategy::Embedded);
+        let python = &out[out.find("── Python").unwrap()..];
+        assert!(
+            python.contains(
+                "    fn load_children(\n        &self,\n        py: pyo3::Python<'_>,\n        \
+                 row: pyo3::PyRef<'_, Product>,\n    ) -> pyo3::PyResult<Product> {"
+            ),
+            "{python}"
+        );
+        assert!(
+            python.contains("mapper.load_children(&mut row).await?;"),
+            "{python}"
+        );
+        assert!(
+            python.contains("    fn find_by_id_with_children(\n"),
+            "{python}"
+        );
+        assert!(
+            python.contains("super::python::run(db, py, mapper.find_by_id_with_children(id))"),
+            "{python}"
+        );
+
+        // The off switch takes both away, as it does on the Rust side.
+        let generate = Generate {
+            children_field: String::new(),
+            ..Generate::default()
+        };
+        let mut opts = fixture::opts(&generate, Strategy::Embedded);
+        opts.pyo3 = true;
+        let out = mapper_file(&fixture::product(), &opts).code;
+        assert!(!out.contains("load_children"), "{out}");
+        assert!(!out.contains("with_children"), "{out}");
+    }
+
+    #[test]
     fn the_python_surface_is_the_same_under_both_strategies() {
         let python = |code: &str| code[code.find("── Python").unwrap()..].to_string();
         assert_eq!(
@@ -869,13 +979,15 @@ mod tests {
             crate::reconcile::reconcile(&out, &out).as_deref(),
             Some(out.as_str())
         );
-        // The Python class wraps the planned operations only: a child
-        // loader is not among them, and nothing removed it.
+        // Both impls carry a `load_children` now — the Rust loader and
+        // its Python wrapper — so a reconcile that keyed methods by name
+        // alone would take one for the other. Both are still here.
         assert!(out.contains("pub async fn load_children"), "{out}");
         assert!(
-            !out.contains("fn load_children(\n        &self,\n        py"),
+            out.contains("fn load_children(\n        &self,\n        py"),
             "{out}"
         );
+        assert_eq!(out.matches("fn load_children(").count(), 2, "{out}");
     }
 
     #[test]

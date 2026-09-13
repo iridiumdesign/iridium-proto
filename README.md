@@ -953,7 +953,16 @@ one = products.find_by_id(made.id)
 one.name = "Dovetail saw, 10in"
 products.update(one)
 products.delete(one.id)
+
+one = products.load_children(one)               # a filled copy
+one = products.find_by_id_with_children(made.id)
 ```
+
+The [children](#children) loaders come too. Python has no `&mut`, so
+`load_children` hands back the row with the field filled rather than
+changing the one it was given; the `_with_children` finder is the same
+as the Rust one. A row that arrives any other way has an empty list
+until one of them runs.
 
 The Rust mappers are `async` and Python, from here, is not: each call
 runs to completion on a tokio runtime the `Database` holds, with the GIL

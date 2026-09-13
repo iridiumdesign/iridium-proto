@@ -327,6 +327,20 @@ assert updated.status == protopy.ItemStatus.Active
 assert updated.tags == ["x", "y"]
 print("  update  ok")
 
+# The parent's side of the foreign key, from Python. There is no `&mut`
+# here, so the loader hands back the row with its children filled, and
+# the finder does both at once.
+kid = items.create(protopy.NewItem("widget-kid", parent_id=made.id))
+assert items.find_by_id(made.id).children == [], "not loaded until asked"
+loaded = items.load_children(items.find_by_id(made.id))
+assert [c.slug for c in loaded.children] == ["widget-kid"], loaded.children
+assert loaded.children[0].parent_id == made.id
+both = items.find_by_id_with_children(made.id)
+assert both is not None and len(both.children) == 1, both
+assert items.find_by_id_with_children(uuid.uuid4()) is None
+items.delete(kid.id)
+print("  children loaded through the mapper")
+
 items.delete(made.id)
 assert items.find_by_id(made.id) is None
 print("  delete  ok")
