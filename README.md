@@ -203,6 +203,9 @@ proto config                 Show the resolved config
 | `--out-dir <dir>` | bulk | Write one model file per table |
 | `--mappers` | bulk | Also generate mappers |
 | `--mapper-dir <dir>` | bulk | Write one mapper file per table |
+| `--operations` | bulk | Also generate the operations; needs `--mappers` and `--pyo3` |
+| `--operation-dir <dir>` | bulk | Write the operations into this directory |
+| `--mapper-path <path>` | operations | Module the operations import mappers from |
 | `--name <name>` | single | Struct name, overriding the derived one |
 | `--no-mod` | bulk | Skip the generated `mod.rs` |
 | `--force` | writers | Overwrite a file `proto` did not generate |
@@ -530,6 +533,68 @@ stale loader behind. Neither does a child in another schema,
 or one excluded by `exclude_tables`: its type would not be there to
 name. A single `proto model` run imports the child's type from the
 sibling module `super::<child>`, the layout `--out-dir` writes.
+
+## Operations
+
+Above the mappers sits what an integrating engineer would otherwise
+write by hand: a layer that takes a request, works out which mapper it
+is for, and runs it. `proto` generates it, because the routing — a
+table name to a mapper, a request's values to that mapper's column
+types — is what the type map already knows, and what drifts first when
+the schema moves.
+
+`Data` is the first operation. It takes its request from Python, so it
+comes with `--pyo3`:
+
+```
+proto schema shop --pyo3 --mappers --operations \
+    --out-dir src/model --mapper-dir src/mapper --operation-dir src/operation
+```
+
+```python
+data = shop.Data(db)
+rows = data.execute({"table": "shop.product", "op": "find",
+                     "where": {"status": "active"}, "order_by": "-created_at",
+                     "limit": 20})
+n = data.execute({"table": "product", "op": "count", "where": {"price__lt": 10}})
+made = data.execute({"table": "product", "op": "create",
+                     "values": {"slug": "dovetail-saw", "name": "Dovetail saw"}})
+data.execute({"table": "product", "op": "update",
+              "where": {"id": made.id}, "values": {"name": "Dovetail saw, 10in"}})
+data.execute({"table": "product", "op": "delete", "where": {"id": made.id}})
+```
+
+`table` is `schema.table`, or the bare name where only one table has
+it. `op` is `find`, `count`, `create`, `update` or `delete`. `where`,
+`order_by`, `limit` and `offset` are what the mapper's `find_where`
+takes. `values` is what `create` inserts, read through the `New…`
+constructor so the same columns are required, or what `update` sets on
+every row `where` finds, through the class's own setters so the same
+types are enforced. `find` and `update` return the rows, `create` the
+row, `count` and `delete` a number. A table that is not routed is a
+`KeyError`; an operation a table cannot do — `create` on a view, `delete`
+on a table without a key — is a `ValueError` naming both.
+
+The routing table is one generated function, `route`, and it is not
+yours to edit: `proto` rewrites it whenever a table arrives or leaves,
+so a route added by hand is lost on the next run. Everything else
+follows the mappers' rule — each method `proto` owns says so, and an
+operation of your own beside `Data` stays where you put it.
+
+`Data` lands as `data.rs` in `--operation-dir`, behind the pyo3
+feature, with its own `register`; call it after the mappers':
+
+```rust
+#[pymodule]
+fn shop(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    model::python::register(m)?;
+    mapper::python::register(m)?;
+    operation::data::register(m)
+}
+```
+
+`proto database` writes one `Data` over every schema at the root of
+`--operation-dir`, with every table qualified.
 
 ## Type mapping
 

@@ -235,7 +235,7 @@ fn python_query_fn(table: &Table, opts: &Opts) -> String {
 /// own type. proto owns this function and rewrites it when the schema
 /// changes.
 #[cfg(feature = "{feature}")]
-fn query_from_python(
+pub fn query_from_python(
     conditions: &pyo3::Bound<'_, pyo3::types::PyDict>,
     order_by: Option<&pyo3::Bound<'_, pyo3::PyAny>>,
     limit: Option<i64>,
@@ -1232,7 +1232,7 @@ mod tests {
         // The converter is a free function beside the class, gated, and
         // reads each column as its own type by full path.
         assert!(
-            python.contains("#[cfg(feature = \"python\")]\nfn query_from_python("),
+            python.contains("#[cfg(feature = \"python\")]\npub fn query_from_python("),
             "{python}"
         );
         for arm in [

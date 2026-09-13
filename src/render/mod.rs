@@ -21,6 +21,7 @@ pub mod children;
 pub(crate) mod fixture;
 pub mod mapper;
 pub mod model;
+pub mod operation;
 pub mod plan;
 pub mod python;
 pub mod query;
@@ -64,6 +65,9 @@ pub struct Opts<'a> {
     /// Module the mappers import the query builder from: `super::query`
     /// beside them, `super::super::query` from a per-schema directory.
     pub query_path: String,
+    /// Module holding the mappers, as the operations import them:
+    /// `crate::mapper`.
+    pub mapper_path: String,
 }
 
 /// Generated source, plus anything the caller should hear about.

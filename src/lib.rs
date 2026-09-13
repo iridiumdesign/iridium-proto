@@ -93,6 +93,7 @@
 //!     name_override: None,
 //!     bridge_path: "super::python".to_string(),
 //!     query_path: "super::query".to_string(),
+//!     mapper_path: "crate::mapper".to_string(),
 //! };
 //!
 //! print!("{}", render::model::model_file(&model, &opts, None).code);
