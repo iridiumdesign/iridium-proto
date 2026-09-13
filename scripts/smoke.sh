@@ -352,6 +352,33 @@ macro_rules! round_trip {
             // the foreign key, and the unbounded list.
             assert!(items.find_by_slug(&found.slug).await?.is_some());
             assert_eq!(items.find_by_bin_id(bin.id).await?.len(), 1);
+
+            // A clause composed at run time, under either strategy:
+            // by value, by range, by null test, by list, ordered and
+            // limited, and refused for a name that is not a column.
+            use proto_smoke::\$module::query::Query;
+            let by_slug = items
+                .find_where(Query::new().eq("slug", format!("slug-{tag}")))
+                .await?;
+            assert_eq!(by_slug.len(), 1, "{tag}: eq");
+            let cheap = items
+                .find_where(
+                    Query::new()
+                        .lt("price", Decimal::from_str("20")?)
+                        .not_null("price")
+                        .order_by_desc("slug")
+                        .limit(10),
+                )
+                .await?;
+            assert!(cheap.iter().any(|i| i.id == made.id), "{tag}: lt and order");
+            let listed = items
+                .count_where(Query::new().any("id", vec![made.id]))
+                .await?;
+            assert_eq!(listed, 1, "{tag}: any");
+            assert!(
+                items.find_where(Query::new().eq("nope", 1)).await.is_err(),
+                "{tag}: a name that is not a column is refused"
+            );
             assert!(items.list().await?.iter().any(|i| i.id == made.id));
 
             // The parent's side of the foreign key: bin has two child

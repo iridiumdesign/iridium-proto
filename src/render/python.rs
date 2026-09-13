@@ -202,6 +202,8 @@ pub fn bridge_file(groups: &[Group], opts: &Opts) -> String {
         r#"use pyo3::prelude::*;
 use sqlx::PgPool;
 
+use super::query::{{Op, Query}};
+
 pyo3::create_exception!(
     proto,
     ProtoError,
@@ -260,6 +262,123 @@ pub fn run<T: Send>(
 /// A database error as Python sees it.
 pub fn error(e: sqlx::Error) -> PyErr {{
     ProtoError::new_err(e.to_string())
+}}
+
+/// A `conditions` dict as a `Query`. Each key is a column name, with an
+/// operator after a double underscore (`price__lt`) and `=` without
+/// one; each value goes through `bind`, which the mapper supplies
+/// knowing its columns' types. `order_by` is a column name or a list of
+/// them, `-name` for descending.
+///
+/// # Errors
+///
+/// `KeyError` for an operator that does not exist, and whatever `bind`
+/// raises for a column or a value.
+pub fn query<'py>(
+    conditions: &Bound<'py, pyo3::types::PyDict>,
+    order_by: Option<&Bound<'py, PyAny>>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    bind: impl Fn(Query, &str, Op, &Bound<'py, PyAny>) -> PyResult<Query>,
+) -> PyResult<Query> {{
+    let mut query = Query::new();
+    for (key, value) in conditions.iter() {{
+        let key: String = key.extract()?;
+        let (column, op) = match key.split_once("__") {{
+            Some((column, suffix)) => {{
+                let op = Op::from_suffix(suffix).ok_or_else(|| {{
+                    pyo3::exceptions::PyKeyError::new_err(format!(
+                        "`{{key}}`: `{{suffix}}` is not an operator"
+                    ))
+                }})?;
+                (column, op)
+            }}
+            None => (key.as_str(), Op::Eq),
+        }};
+        query = bind(query, column, op, &value)?;
+    }}
+    if let Some(order) = order_by {{
+        let columns: Vec<String> = match order.extract::<String>() {{
+            Ok(one) => vec![one],
+            Err(_) => order.extract()?,
+        }};
+        for column in columns {{
+            query = match column.strip_prefix('-') {{
+                Some(desc) => query.order_by_desc(desc),
+                None => query.order_by(&column),
+            }};
+        }}
+    }}
+    if let Some(n) = limit {{
+        query = query.limit(n);
+    }}
+    if let Some(n) = offset {{
+        query = query.offset(n);
+    }}
+    Ok(query)
+}}
+
+/// Bind one condition, reading the value as `T`. `None` is `IS NULL`,
+/// or `IS NOT NULL` under `ne`; a list is `= ANY`; anything else is
+/// read as `T`, and refused with a `TypeError` when it is not one.
+///
+/// # Errors
+///
+/// `ValueError` for `None` or a list under an operator that cannot take
+/// it; `TypeError` for a value that is not a `T`.
+pub fn bind<'py, T>(query: Query, column: &str, op: Op, value: &Bound<'py, PyAny>) -> PyResult<Query>
+where
+    T: FromPyObject<'py>
+        + for<'q> sqlx::Encode<'q, sqlx::Postgres>
+        + sqlx::Type<sqlx::Postgres>
+        + sqlx::postgres::PgHasArrayType
+        + Send
+        + 'static,
+{{
+    if value.is_none() {{
+        return match op {{
+            Op::Eq => Ok(query.null(column)),
+            Op::Ne => Ok(query.not_null(column)),
+            other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "`{{column}}__{{}}`: None is `IS NULL` under a bare key or \
+                 `IS NOT NULL` under `__ne`; `__{{}}` cannot take it",
+                other.suffix(),
+                other.suffix()
+            ))),
+        }};
+    }}
+    if let Ok(list) = value.downcast::<pyo3::types::PyList>() {{
+        let values: Vec<T> = list.extract()?;
+        return match op {{
+            Op::Eq | Op::Any => Ok(query.any(column, values)),
+            other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "`{{column}}__{{}}`: a list is `= ANY` under a bare key or \
+                 `__in`; `__{{}}` cannot take it",
+                other.suffix(),
+                other.suffix()
+            ))),
+        }};
+    }}
+    if op == Op::Any {{
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "`{{column}}__in` takes a list"
+        )));
+    }}
+    let value: T = value.extract()?;
+    Ok(query.cond(column, op, value))
+}}
+
+/// `KeyError`: `column` is not a column of `table`.
+pub fn no_column(table: &str, column: &str) -> PyErr {{
+    pyo3::exceptions::PyKeyError::new_err(format!("`{{column}}` is not a column of {{table}}"))
+}}
+
+/// `TypeError`: `column` exists, but its type does not cross from
+/// Python, so it cannot be queried from here.
+pub fn unsupported(table: &str, column: &str) -> PyErr {{
+    pyo3::exceptions::PyTypeError::new_err(format!(
+        "`{{column}}` of {{table}} cannot be queried from Python: its type does not cross"
+    ))
 }}
 
 /// Register `Database`, `ProtoError`, and every generated mapper class

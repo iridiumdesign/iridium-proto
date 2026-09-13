@@ -100,6 +100,7 @@ const KNOWN: [&str; 4] = ["chrono", "uuid", "rust_decimal", "serde_json"];
 ///     command: "proto model shop.tag".to_string(),
 ///     name_override: None,
 ///     bridge_path: "super::python".to_string(),
+///     query_path: "super::query".to_string(),
 /// };
 /// let model = Model {
 ///     table: Table {

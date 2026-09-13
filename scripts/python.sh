@@ -337,6 +337,47 @@ loaded = items.load_children(parent)
 assert [c.slug for c in loaded.children] == ["widget-kid"], loaded.children
 assert loaded.children[0].parent_id == made.id
 assert parent.children == [], "the row given is left as it was"
+
+# A query dict: keys are columns, an operator after a double underscore,
+# None is IS NULL, a list is ANY; order_by, limit and offset beside it.
+# Each value is read as its column's type, and a wrong one is refused.
+assert [i.id for i in items.find_where({"slug": "changed"})] == [made.id]
+both = sorted(i.slug for i in items.find_where({"id": [made.id, kid.id]}))
+assert both == ["changed", "widget-kid"], both
+kids = items.find_where({"parent_id__ne": None})
+assert kid.id in [i.id for i in kids] and all(i.parent_id is not None for i in kids)
+first = items.find_where({"id": [made.id, kid.id]}, order_by="-slug", limit=1)
+assert [i.slug for i in first] == ["widget-kid"], first
+assert items.count_where({"id": [made.id, kid.id]}) == 2
+liked = items.find_where({"slug__like": "widget%"}, order_by=["slug"])
+assert [i.slug for i in liked] == ["widget-kid"], liked
+assert items.find_where({"price__gte": decimal.Decimal("9.99")})[0].id == made.id
+try:
+    items.find_where({"nope": 1})
+except KeyError:
+    pass
+else:
+    raise AssertionError("an unknown column did not raise KeyError")
+try:
+    items.find_where({"id": 5})
+except TypeError:
+    pass
+else:
+    raise AssertionError("a value of the wrong type did not raise TypeError")
+try:
+    items.find_where({"tags": ["x"]})
+except TypeError:
+    pass
+else:
+    raise AssertionError("an array column did not say it cannot cross")
+for bad in ({"id__in": made.id}, {"price__lt": None}, {"id__lt": [made.id]}):
+    try:
+        items.find_where(bad)
+    except ValueError as e:
+        assert "__" in str(e), str(e)
+    else:
+        raise AssertionError(f"{bad} was not refused before the database saw it")
+print("  queries from a dict")
 both = items.find_by_id_with_children(made.id)
 assert both is not None and len(both.children) == 1, both
 assert items.find_by_id_with_children(uuid.uuid4()) is None

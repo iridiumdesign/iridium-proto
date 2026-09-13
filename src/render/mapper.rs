@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use super::children::{self, ChildField};
 use super::plan::{self, Kind, Operation};
 use super::{OWNED, Opts, Rendered, Strategy, column_list, escape, header, import_block, indent};
-use crate::introspect::{Column, Model, Table};
+use crate::introspect::{Column, Model, PgType, Table};
 use crate::naming;
 use crate::quoting;
 use crate::typemap;
@@ -61,6 +61,7 @@ pub fn mapper_file(model: &Model, opts: &Opts) -> Rendered {
             4,
         ));
     }
+    methods.push_str(&indent(&where_methods(table, opts, &row), 4));
 
     let mut code = header(
         opts,
@@ -134,6 +135,8 @@ fn python_block(
             4,
         ));
     }
+    methods.push_str(&indent(&python_where_methods(opts, row), 4));
+    let converter = python_query_fn(table, opts);
 
     format!(
         r#"
@@ -156,8 +159,153 @@ impl Py{row}Mapper {{
         Self {{ db }}
     }}
 {methods}}}
+{converter}"#
+    )
+}
+
+/// `find_where` and `count_where` for Python: a dict of conditions, read
+/// through [`python_query_fn`], and the Rust method behind it.
+fn python_where_methods(opts: &Opts, row: &str) -> String {
+    let bridge = &opts.bridge_path;
+    format!(
+        r#"
+/// Rows matching `conditions`: a dict of column name to value. A key
+/// may carry an operator after a double underscore — `price__lt`,
+/// `slug__like`, `id__in` — and is `=` without one. `None` is
+/// `IS NULL` (`IS NOT NULL` under `__ne`); a list is `= ANY`.
+/// `order_by` is a column name or a list of them, `-name` for
+/// descending.
+{OWNED}#[pyo3(signature = (conditions, *, order_by = None, limit = None, offset = None))]
+fn find_where(
+    &self,
+    py: pyo3::Python<'_>,
+    conditions: &pyo3::Bound<'_, pyo3::types::PyDict>,
+    order_by: Option<&pyo3::Bound<'_, pyo3::PyAny>>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> pyo3::PyResult<Vec<{row}>> {{
+    let query = query_from_python(conditions, order_by, limit, offset)?;
+    let db = self.db.get();
+    let mapper = {row}Mapper::new(&db.pool);
+    {bridge}::run(db, py, mapper.find_where(query))
+}}
+
+/// How many rows match `conditions`, read as `find_where` reads them.
+{OWNED}fn count_where(
+    &self,
+    py: pyo3::Python<'_>,
+    conditions: &pyo3::Bound<'_, pyo3::types::PyDict>,
+) -> pyo3::PyResult<i64> {{
+    let query = query_from_python(conditions, None, None, None)?;
+    let db = self.db.get();
+    let mapper = {row}Mapper::new(&db.pool);
+    {bridge}::run(db, py, mapper.count_where(query))
+}}
 "#
     )
+}
+
+/// The dict-to-`Query` conversion for one table, as a free function
+/// beside the class: each column's value is read as that column's own
+/// Rust type, so a `uuid` column takes a `uuid.UUID` and refuses a
+/// `str`. A column whose type does not cross from Python, or is not
+/// proto's to vouch for, is refused by name.
+fn python_query_fn(table: &Table, opts: &Opts) -> String {
+    let bridge = &opts.bridge_path;
+    let query = format!("{}::Query", opts.query_path);
+    let feature = &opts.generate.pyo3_feature;
+    // Named in two string literals below, so escaped for them.
+    let relation = escape(&format!("{}.{}", table.schema, table.name));
+    let module = naming::ident(&table.name);
+    let mut arms = String::new();
+    for column in &table.columns {
+        let name = escape(&column.name);
+        match python_bindable(column, &module, opts) {
+            Some(ty) => arms.push_str(&format!(
+                "            \"{name}\" => {bridge}::bind::<{ty}>(query, column, op, value),\n"
+            )),
+            None => arms.push_str(&format!(
+                "            \"{name}\" => Err({bridge}::unsupported(\"{relation}\", column)),\n"
+            )),
+        }
+    }
+    format!(
+        r#"
+/// The `conditions` dict as a `Query`, each value read as its column's
+/// own type. proto owns this function and rewrites it when the schema
+/// changes.
+#[cfg(feature = "{feature}")]
+fn query_from_python(
+    conditions: &pyo3::Bound<'_, pyo3::types::PyDict>,
+    order_by: Option<&pyo3::Bound<'_, pyo3::PyAny>>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> pyo3::PyResult<{query}> {{
+    {bridge}::query(conditions, order_by, limit, offset, |query, column, op, value| {{
+        match column {{
+{arms}            _ => Err({bridge}::no_column("{relation}", column)),
+        }}
+    }})
+}}
+"#
+    )
+}
+
+/// The full Rust path a column's value is read as from Python, or
+/// `None` when it cannot be: an array, a composite, a type from
+/// `[generate.types]`, one proto does not know, or one with no
+/// conversion on the Python side.
+fn python_bindable(column: &Column, module: &str, opts: &Opts) -> Option<String> {
+    let generate = opts.generate;
+    let mapped = typemap::map(&column.ty, generate);
+    let pg_name = match &column.ty {
+        PgType::Array(_) | PgType::Composite { .. } => return None,
+        PgType::Enum { name, .. } | PgType::Scalar(name) => name,
+    };
+    if mapped.unmapped.is_some()
+        || generate.types.contains_key(pg_name)
+        || generate.types.contains_key(pg_name.trim_start_matches('_'))
+    {
+        return None;
+    }
+    if let PgType::Enum { name, .. } = &column.ty {
+        // Re-exported from the model's own module, wherever it is filed.
+        return Some(format!(
+            "{}::{module}::{}",
+            opts.model_path,
+            naming::pascal_case(name)
+        ));
+    }
+    // Only what pyo3's conversions cover: the numbers, text, and the
+    // uuid, decimal and chrono types its features turn on.
+    const CROSSES: [&str; 14] = [
+        "bool",
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "f32",
+        "f64",
+        "String",
+        "Uuid",
+        "Decimal",
+        "DateTime<Utc>",
+        "NaiveDateTime",
+        "NaiveDate",
+        "NaiveTime",
+    ];
+    if !CROSSES.contains(&mapped.text.as_str()) {
+        return None;
+    }
+    // Written in full, since the file's imports are for the Rust side
+    // and a name used only under the feature would be an unused import
+    // without it.
+    let mut path = mapped.text.clone();
+    for import in &mapped.imports {
+        let leaf = import.rsplit("::").next().unwrap_or(import);
+        path = path.replace(leaf, import);
+    }
+    Some(path)
 }
 
 /// One Python method: the Rust method's doc, its arguments as Python
@@ -528,6 +676,59 @@ fn child_methods(
     out
 }
 
+/// `find_where` and `count_where`: the one place a mapper's SQL is
+/// assembled at run time, under either strategy, since a `Query` names
+/// columns the caller chooses and no fixed function can take that.
+/// Every value is still bound, and the column list the `Query` is
+/// checked against is written here, where a regeneration corrects it.
+fn where_methods(table: &Table, opts: &Opts, row: &str) -> String {
+    // Named in full rather than imported: a table named `query` has a
+    // row type `Query` of its own, and the two must not meet.
+    let query = format!("{}::Query", opts.query_path);
+    let relation = escape(&quoting::qualified(&table.schema, &table.name));
+    let qualified = format!("{}.{}", table.schema, table.name);
+    let columns: Vec<String> = table
+        .columns
+        .iter()
+        .map(|c| {
+            format!(
+                "(\"{}\", \"{}\")",
+                escape(&c.name),
+                escape(&quoting::ident(&c.name))
+            )
+        })
+        .collect();
+    let columns = columns.join(", ");
+    format!(
+        r#"
+/// Rows matching `query`, in the order it asks for.
+///
+/// The clause is assembled here, so this is the one method whose SQL
+/// is not a fixed string under either strategy: a `Query` names
+/// columns at run time, and no function can take that. Every value is
+/// still bound, never written into the statement, and a name that is
+/// not a column of `{qualified}` is an error before anything is sent.
+{OWNED}pub async fn find_where(&self, query: {query}) -> Result<Vec<{row}>, sqlx::Error> {{
+    let (sql, args) = query.select("{relation}", Self::columns())?;
+    sqlx::query_as_with(&sql, args).fetch_all(self.pool).await
+}}
+
+/// How many rows match `query`. Its order, limit and offset do not
+/// apply.
+{OWNED}pub async fn count_where(&self, query: {query}) -> Result<i64, sqlx::Error> {{
+    let (sql, args) = query.count("{relation}", Self::columns())?;
+    sqlx::query_scalar_with(&sql, args).fetch_one(self.pool).await
+}}
+
+/// Every column of `{qualified}` by its Postgres name, with the
+/// identifier as a statement writes it. What a `Query` may name.
+{OWNED}fn columns() -> &'static [(&'static str, &'static str)] {{
+    &[{columns}]
+}}
+"#
+    )
+}
+
 /// The key finder a child field gets a `_with_<stem>` wrapper on, and
 /// the wrapper's name — unless a column already claims that name, in
 /// which case there is no wrapper. Both the Rust and the Python surface
@@ -754,7 +955,11 @@ mod tests {
     #[test]
     fn every_method_proto_generates_says_so() {
         let out = render(Strategy::Embedded);
-        let methods = out.matches("    pub async fn ").count() + 1; // + new
+        // The async ones, plus `new`, plus the `columns` list behind
+        // `find_where`, which is a method too and proto's to rewrite.
+        let methods = out.matches("    pub async fn ").count()
+            + out.matches("    pub fn ").count()
+            + out.matches("    fn ").count();
         assert_eq!(
             out.matches("proto owns this method").count(),
             methods,
@@ -954,6 +1159,112 @@ mod tests {
         );
         assert!(out.contains("new: pyo3::PyRef<'_, NewProduct>,"), "{out}");
         assert!(syn::parse_file(&out).is_ok(), "{out}");
+    }
+
+    #[test]
+    fn a_query_finds_and_counts_under_both_strategies() {
+        for strategy in [Strategy::Embedded, Strategy::Server] {
+            let out = render(strategy);
+            // Named in full: a table named `query` has a `Query` of its own.
+            assert!(!out.contains("use super::query::Query;"), "{out}");
+            assert!(
+                out.contains(
+                    "    pub async fn find_where(&self, query: super::query::Query) -> \
+                     Result<Vec<Product>, sqlx::Error> {\n        \
+                     let (sql, args) = query.select(\"shop.product\", Self::columns())?;"
+                ),
+                "{out}"
+            );
+            assert!(
+                out.contains("    pub async fn count_where(&self, query: super::query::Query) -> Result<i64, sqlx::Error> {"),
+                "{out}"
+            );
+            // The column list is what the query is checked against, and
+            // it is written where a regeneration corrects it.
+            assert!(
+                out.contains("&[(\"id\", \"id\"), (\"slug\", \"slug\"), (\"name\", \"name\")"),
+                "{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_table_that_would_take_a_reserved_module_name_is_named() {
+        let mut query = fixture::product();
+        query.table.name = "Query".into();
+        let models = [fixture::product(), query];
+        assert_eq!(
+            crate::render::reserved_module(&models, &["query", "python"]).as_deref(),
+            Some("shop.Query")
+        );
+        assert_eq!(
+            crate::render::reserved_module(&models[..1], &["query", "python"]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_quoted_column_is_listed_as_the_statement_writes_it() {
+        let generate = Generate::default();
+        let out = mapper_file(
+            &fixture::awkward(),
+            &fixture::opts(&generate, Strategy::Embedded),
+        )
+        .code;
+        assert!(
+            out.contains("(\"Mixed Case\", \"\\\"Mixed Case\\\"\")"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_dict_query_crosses_by_column_type() {
+        let out = render_python(Strategy::Embedded);
+        let python = &out[out.find("── Python").unwrap()..];
+        assert!(
+            python.contains(
+                "#[pyo3(signature = (conditions, *, order_by = None, limit = None, offset = None))]"
+            ),
+            "{python}"
+        );
+        assert!(python.contains("    fn find_where(\n"), "{python}");
+        assert!(python.contains("    fn count_where(\n"), "{python}");
+        // The converter is a free function beside the class, gated, and
+        // reads each column as its own type by full path.
+        assert!(
+            python.contains("#[cfg(feature = \"python\")]\nfn query_from_python("),
+            "{python}"
+        );
+        for arm in [
+            "\"id\" => super::python::bind::<uuid::Uuid>(query, column, op, value),",
+            "\"slug\" => super::python::bind::<String>(query, column, op, value),",
+            "\"price\" => super::python::bind::<rust_decimal::Decimal>(query, column, op, value),",
+            "\"created_at\" => super::python::bind::<chrono::DateTime<chrono::Utc>>(query, column, op, value),",
+            "\"status\" => super::python::bind::<crate::model::product::ProductStatus>(query, column, op, value),",
+            "_ => Err(super::python::no_column(\"shop.product\", column)),",
+        ] {
+            assert!(python.contains(arm), "missing {arm}\n{python}");
+        }
+        // Without the feature nothing of it is named, so the Rust build
+        // carries no unused import for a type only Python reads.
+        let plain = render(Strategy::Embedded);
+        assert!(!plain.contains("query_from_python"), "{plain}");
+        assert!(!plain.contains("rust_decimal"), "{plain}");
+    }
+
+    #[test]
+    fn a_column_that_does_not_cross_is_refused_by_name() {
+        let mut generate = Generate::default();
+        generate
+            .types
+            .insert("numeric".into(), "bigdecimal::BigDecimal".into());
+        let mut opts = fixture::opts(&generate, Strategy::Embedded);
+        opts.pyo3 = true;
+        let out = mapper_file(&fixture::product(), &opts).code;
+        assert!(
+            out.contains("\"price\" => Err(super::python::unsupported(\"shop.product\", column)),"),
+            "{out}"
+        );
     }
 
     #[test]

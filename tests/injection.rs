@@ -85,6 +85,7 @@ fn opts(generate: &Generate, strategy: Strategy) -> Opts<'_> {
         command: "proto mapper public.x".to_string(),
         name_override: None,
         bridge_path: "super::python".to_string(),
+        query_path: "super::query".to_string(),
     }
 }
 
@@ -96,6 +97,14 @@ fn queries(code: &str) -> Vec<(String, String)> {
 
     while let Some(at) = rest.find("sqlx::query") {
         let after = &rest[at..];
+        // `find_where` hands sqlx a statement its `Query` assembled, as
+        // `query_as_with(&sql, args)`; that builder is tested where it
+        // is rendered. Everything else takes a literal, and is checked.
+        let paren = after.find('(').expect("a query is a call");
+        if !after[paren + 1..].trim_start().starts_with('"') {
+            rest = &after[paren + 1..];
+            continue;
+        }
         let open = after.find('"').expect("a query takes a string literal");
         let body = &after[open + 1..];
 
@@ -235,6 +244,13 @@ fn hostile_names_cannot_close_an_identifier() {
     let generate = Generate::default();
     for strategy in [Strategy::Embedded, Strategy::Server] {
         let code = render::mapper::mapper_file(&hostile(), &opts(&generate, strategy)).code;
+        // The list `find_where` checks a `Query` against carries the
+        // identifier exactly as a statement writes it: quoted, the
+        // quote doubled, escaped for the Rust literal it sits in.
+        assert!(
+            code.contains(r#"\"x\"\"; DROP TABLE keep_me; --\""#),
+            "{strategy:?}: the column list lacks the quoted name:\n{code}"
+        );
         for (literal, _) in queries(&code) {
             let sql = unescape(&literal);
             // Quoted, the payload's own quote is doubled — that doubling
@@ -289,6 +305,26 @@ fn the_migration_escapes_names_used_as_literals() {
 }
 
 // ── 3. The Rust the SQL lives in ────────────────────────────────────────
+
+/// The whole file has to stay Rust, not only the statements: a name
+/// lands in doc comments, in the column list a `Query` is checked
+/// against, and in the messages the Python side raises. `syn` is the
+/// arbiter, with and without the Python side.
+#[test]
+fn a_hostile_mapper_is_still_rust_everywhere() {
+    let generate = Generate::default();
+    for strategy in [Strategy::Embedded, Strategy::Server] {
+        for pyo3 in [false, true] {
+            let mut opts = opts(&generate, strategy);
+            opts.pyo3 = pyo3;
+            let code = render::mapper::mapper_file(&hostile(), &opts).code;
+            assert!(
+                syn::parse_file(&code).is_ok(),
+                "{strategy:?} pyo3={pyo3}: the mapper does not parse:\n{code}"
+            );
+        }
+    }
+}
 
 /// A quoted identifier carries the character that ends a Rust string
 /// literal. If it is not escaped on the way in, the payload stops being
