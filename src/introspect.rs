@@ -401,6 +401,8 @@ SELECT a.attname::text AS name
    AND i.indisprimary
  ORDER BY array_position(i.indkey, a.attnum)";
 
+// Only the key attributes count: an index's INCLUDE columns follow them
+// in indkey and do not decide uniqueness.
 const UNIQUE_SQL: &str = "\
 SELECT array_agg(a.attname::text ORDER BY k.ord) AS cols
   FROM pg_index i
@@ -410,6 +412,7 @@ SELECT array_agg(a.attname::text ORDER BY k.ord) AS cols
   JOIN pg_attribute a  ON a.attrelid = t.oid AND a.attnum = k.attnum
  WHERE n.nspname = $1
    AND t.relname = $2
+   AND k.ord <= i.indnkeyatts
    AND i.indisunique
    AND NOT i.indisprimary
    AND i.indpred IS NULL
