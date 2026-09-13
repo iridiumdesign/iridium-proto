@@ -51,6 +51,15 @@ pub struct Cli {
     )]
     model_path: String,
 
+    /// Module the operations import the mappers from
+    #[arg(
+        long,
+        global = true,
+        value_name = "PATH",
+        default_value = "crate::mapper"
+    )]
+    mapper_path: String,
+
     /// Directory for the migrations `--sql server` generates; overrides
     /// `migrations_dir` in the config
     #[arg(long, global = true, value_name = "DIR")]
@@ -157,6 +166,11 @@ pub enum Command {
         #[arg(long)]
         mappers: bool,
 
+        /// Also generate the operations; requires --mappers, --pyo3 and
+        /// --operation-dir
+        #[arg(long)]
+        operations: bool,
+
         /// Also generate a `#[pymodule]` registering every class, under
         /// this name; requires --pyo3 and --out-dir
         #[arg(long, value_name = "NAME")]
@@ -169,6 +183,10 @@ pub enum Command {
         /// Write one mapper file per table into this directory
         #[arg(long, value_name = "DIR")]
         mapper_dir: Option<PathBuf>,
+
+        /// Write the operations into this directory
+        #[arg(long, value_name = "DIR")]
+        operation_dir: Option<PathBuf>,
 
         /// Delete files proto generated for relations that are gone
         #[arg(long)]
@@ -193,6 +211,11 @@ pub enum Command {
         #[arg(long)]
         mappers: bool,
 
+        /// Also generate the operations; requires --mappers, --pyo3 and
+        /// --operation-dir
+        #[arg(long)]
+        operations: bool,
+
         /// Also generate a `#[pymodule]` registering every class, under
         /// this name; requires --pyo3
         #[arg(long, value_name = "NAME")]
@@ -205,6 +228,10 @@ pub enum Command {
         /// Root directory for the generated mappers
         #[arg(long, value_name = "DIR")]
         mapper_dir: Option<PathBuf>,
+
+        /// Directory for the generated operations
+        #[arg(long, value_name = "DIR")]
+        operation_dir: Option<PathBuf>,
 
         /// Delete files proto generated for relations that are gone
         #[arg(long)]

@@ -95,7 +95,7 @@ CREATE TABLE ${SCHEMA}_2.item (
 SQL
 
 say "generating models and mappers with --pyo3 and a #[pymodule]"
-mkdir -p "$WORK/src/model" "$WORK/src/mapper" "$WORK/.cargo"
+mkdir -p "$WORK/src/model" "$WORK/src/mapper" "$WORK/src/operation" "$WORK/.cargo"
 # An extension crate declares pyo3 itself, not optional, because the
 # whole crate is the extension. proto sees that and writes a feature
 # that lists the conversions only, with no `dep:pyo3`. Everything else
@@ -115,7 +115,12 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.26", features = ["extension-module"] }
 TOML
 "$PROTO" --db "$TARGET" schema "$SCHEMA" --pyo3 --pymodule protopy \
-    --mappers --out-dir "$WORK/src/model" --mapper-dir "$WORK/src/mapper"
+    --mappers --operations --out-dir "$WORK/src/model" \
+    --mapper-dir "$WORK/src/mapper" --operation-dir "$WORK/src/operation"
+test -f "$WORK/src/operation/data.rs" || {
+    echo "  no Data operation written" >&2
+    exit 1
+}
 test -f "$WORK/src/mapper/python.rs" || {
     echo "  no bridge written beside the mappers" >&2
     exit 1
@@ -156,6 +161,7 @@ use std::str::FromStr;
 
 pub mod mapper;
 pub mod model;
+pub mod operation;
 use model::item::{Dimensions, Item, ItemStatus};
 
 #[pyfunction]
@@ -181,6 +187,7 @@ fn sample() -> Item {
 fn protopy_test(m: &Bound<'_, PyModule>) -> PyResult<()> {
     model::python::register(m)?;
     mapper::python::register(m)?;
+    operation::data::register(m)?;
     m.add_function(wrap_pyfunction!(sample, m)?)?;
     Ok(())
 }
@@ -402,6 +409,45 @@ except protopy.ProtoError:
 else:
     raise AssertionError("a bad connection did not raise")
 print("  errors  arrive as ProtoError")
+
+# The Data operation: one request dict in, one result out, through
+# whichever mapper the request names, with the same rules the mapper
+# class enforces on values and conditions.
+data = protopy.Data(db)
+one = data.execute({"table": "item", "op": "create",
+                    "values": {"slug": "routed", "price": decimal.Decimal("1.50")}})
+assert isinstance(one, protopy.Item) and one.slug == "routed", one
+found = data.execute({"table": "proto_python.item", "op": "find",
+                      "where": {"slug": "routed"}})
+assert [i.id for i in found] == [one.id], found
+assert data.execute({"table": "item", "op": "count",
+                     "where": {"id": [one.id]}}) == 1
+changed = data.execute({"table": "item", "op": "update",
+                        "where": {"id": one.id},
+                        "values": {"slug": "rerouted", "status": protopy.ItemStatus.Active}})
+assert [i.slug for i in changed] == ["rerouted"], changed
+assert items.find_by_id(one.id).status == protopy.ItemStatus.Active
+for bad, error in (
+    ({"op": "find"}, KeyError),                                  # no table
+    ({"table": "nowhere", "op": "find"}, KeyError),              # not routed
+    ({"table": "item", "op": "explode"}, ValueError),            # no such op
+    ({"table": "item", "op": "create"}, ValueError),             # no values
+    ({"table": "item", "op": "find", "where": {"nope": 1}}, KeyError),
+    ({"table": "item", "op": "update", "where": {"id": one.id},
+      "values": {"slug": 5}}, TypeError),                        # the setter refuses
+    ({"table": "item", "op": "update", "where": {"id": one.id},
+      "values": {"id": uuid.uuid4()}}, ValueError),              # the key is fixed
+):
+    try:
+        data.execute(bad)
+    except error:
+        pass
+    else:
+        raise AssertionError(f"{bad} did not raise {error.__name__}")
+assert data.execute({"table": "item", "op": "delete",
+                     "where": {"slug": "rerouted"}}) == 1
+assert items.find_by_id(one.id) is None
+print("  Data    routes each request to its mapper")
 PY
 )
 

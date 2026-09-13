@@ -140,7 +140,8 @@ CREATE TABLE $SCHEMA."order" (
 );
 SQL
 
-mkdir -p "$WORK/src/model" "$WORK/src/mapper" "$WORK/migrations"
+mkdir -p "$WORK/src/model" "$WORK/src/mapper" "$WORK/src/operation" \
+    "$WORK/migrations"
 
 # The crate starts with only what its own code needs. Everything the
 # generated code needs — sqlx, serde, the type crates, pyo3 and the
@@ -160,8 +161,9 @@ TOML
 say "generating models, mappers and functions"
 # Both strategies, side by side. They emit the same API, so the same
 # round trip runs through each and neither can rot unnoticed.
-"$PROTO" --db "$TARGET" schema "$SCHEMA" --pyo3 --mappers \
-    --out-dir "$WORK/src/model" --mapper-dir "$WORK/src/mapper"
+"$PROTO" --db "$TARGET" schema "$SCHEMA" --pyo3 --mappers --operations \
+    --out-dir "$WORK/src/model" --mapper-dir "$WORK/src/mapper" \
+    --operation-dir "$WORK/src/operation"
 "$PROTO" --db "$TARGET" --sql server --migrations-dir "$WORK/migrations" \
     schema "$SCHEMA" --pyo3 --mappers \
     --out-dir "$WORK/src/model" --mapper-dir "$WORK/src/mapper_server"
@@ -235,7 +237,8 @@ if [ "$SPAN_AT" -gt "$DIMS_AT" ]; then
 fi
 
 say "compiling the generated crate, and linting it as hard as this one"
-printf 'pub mod mapper;\npub mod mapper_server;\npub mod model;\n' > "$WORK/src/lib.rs"
+printf 'pub mod mapper;\npub mod mapper_server;\npub mod model;\npub mod operation;\n' \
+    > "$WORK/src/lib.rs"
 # Generated code is held to the same bar as the code that writes it:
 # whatever proto emits has to survive `-D warnings` in someone else's
 # crate, or it is proto handing them a lint to clean up.
@@ -244,6 +247,7 @@ printf 'pub mod mapper;\npub mod mapper_server;\npub mod model;\n' > "$WORK/src/
     cargo check --quiet
     cargo check --quiet --features python
     cargo clippy --quiet --all-targets -- -D warnings
+    cargo clippy --quiet --all-targets --features python -- -D warnings
 )
 
 say "running a generated mapper against the server"

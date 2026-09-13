@@ -539,6 +539,14 @@ fn constructor(columns: &[&Column], opts: &Opts, name: &str) -> String {
         }
     }
     let owned = indent(OWNED, 4);
+    // A constructor's arity is the table's width, and clippy would
+    // rather it were not: a wide table says so once rather than handing
+    // the consumer a lint.
+    let wide = if params.len() > 7 {
+        "    #[allow(clippy::too_many_arguments)]\n"
+    } else {
+        ""
+    };
     format!(
         r#"
 #[cfg(feature = "{feature}")]
@@ -547,7 +555,7 @@ impl {name} {{
     /// Build an input. Columns that are `NOT NULL` without a default are
     /// required; the rest are keyword-only and default to `None`, which
     /// leaves a defaulted column to the database.
-{owned}    #[new]
+{owned}{wide}    #[new]
     #[pyo3(signature = (
         {signature},
     ))]
@@ -589,6 +597,7 @@ mod tests {
     use super::*;
     use crate::config::Generate;
     use crate::introspect::PgEnum;
+    use crate::introspect::PgType;
 
     fn render(pyo3: bool) -> Rendered {
         let generate = Generate::default();
@@ -650,6 +659,32 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("org_id: Option<MyUuid>,"), "{out}");
+    }
+
+    #[test]
+    fn a_wide_constructor_says_so_once_rather_than_handing_over_a_lint() {
+        // shop.product's input takes fewer than eight arguments.
+        let out = render(true).code;
+        assert!(!out.contains("too_many_arguments"), "{out}");
+
+        let mut wide = fixture::product();
+        for i in 0..8 {
+            wide.table.columns.push(fixture::column(
+                &format!("extra_{i}"),
+                PgType::Scalar("text".into()),
+                "text",
+                false,
+            ));
+        }
+        let generate = Generate::default();
+        let mut opts = fixture::opts(&generate, Strategy::Embedded);
+        opts.pyo3 = true;
+        opts.inputs = true;
+        let out = model_file(&wide, &opts, None).code;
+        assert!(
+            out.contains("    #[allow(clippy::too_many_arguments)]\n    #[new]"),
+            "{out}"
+        );
     }
 
     #[test]
