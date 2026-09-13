@@ -23,9 +23,11 @@ seam between the application's representation and the current state of the
 database. `proto` builds the layer after you have your database.
 
 `proto` is written in Rust and creates that layer in Rust, with the option to
-make it Python-compatible. This is another opinion, based on how my teams are
-currently writing software. There is a lot of Python remaining at the edges,
-with the core moving to the performance and safety of Rust.
+make it Python-compatible: the models, the mappers, a query over them, and
+an operation that routes a request to the right mapper. This is another
+opinion, based on how my teams are currently writing software. There is a lot
+of Python remaining at the edges, with the core moving to the performance and
+safety of Rust.
 
 The generated code is written against `sqlx`, which is one more opinion.
 By default the SQL is embedded in the mappers. Choose `--sql server` and
@@ -822,11 +824,23 @@ $ diff before.rs after.rs
 >         .bind(&new.color)
 ```
 
+**What the schema no longer calls for is taken back.** Drop a unique
+constraint and its finder goes; rename a children field and the old
+loader goes with it, along with the `use` of a sibling model that
+nothing names any more; prune a table and its `pub mod` line is
+removed from the module list. Only what carries the ownership notice is
+touched: a method of yours with the same name as a former finder is
+not `proto`'s to remove. And a field that arrives brings its attributes
+and doc comment with it, so a `#[sqlx(skip)]` or a rename is never
+dropped on the way in.
+
 **What is not reconciled.** A file that does not parse is left alone and
 written whole, since half an edit is nothing to reason about. Enum
 variants are replaced as a unit rather than one at a time — a variant
 list is not somewhere a line gets edited — but only they are, and
-anything else in that file stays.
+anything else in that file stays. A free function `proto` wrote, such
+as the dict converter beside a Python mapper class, is replaced whole
+when it changes, and left alone when it has not.
 
 **Taking a file over: delete the `@generated` line.** Without the
 marker, `proto` stops managing that file. It says so on every run and
@@ -1121,6 +1135,7 @@ guarantees on the far side:
 | `timestamptz` | aware `datetime.datetime` |
 | `text[]` | `list[str]` |
 | an enum type | a Python enum, comparable and `int()`-able |
+| a composite type | its own class, with the same fields |
 | a nullable column | the value, or `None` |
 
 Setters are type-checked rather than coercing, and a `NOT NULL` column
