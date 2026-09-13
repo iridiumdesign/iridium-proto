@@ -349,6 +349,34 @@ there is nothing to address a row by.
 database does not own, addressed by the key. That matches what the
 functions can express, so both strategies behave identically.
 
+Between the finders and a hand-written query sits `find_where`, which
+takes a `Query` built at run time:
+
+```rust
+use crate::mapper::query::Query;
+
+let cheap = products
+    .find_where(
+        Query::new()
+            .eq("status", ProductStatus::Active)
+            .lt("price", Decimal::new(1000, 2))
+            .not_null("org_id")
+            .order_by("name")
+            .limit(20),
+    )
+    .await?;
+let n = products.count_where(Query::new().any("id", ids)).await?;
+```
+
+Column names are Postgres names. Every value is bound, never written
+into the statement, and a name that is not a column of the table is an
+error before anything is sent. `Query` lives in a `query.rs` beside the
+mappers, generated once and depending on `sqlx` alone; a lone
+`proto mapper` assumes it at `super::query`. This is the one method
+whose SQL is assembled at run time under either strategy: a function
+cannot take a clause the caller composes, so `--sql server` embeds it
+too, and the method's doc comment says so.
+
 ### Where the SQL lives
 
 `--sql embedded` (the default) puts the statements in the Rust:
@@ -957,6 +985,26 @@ one = products.load_children(one)               # a filled copy
 one = products.find_by_id_with_children(made.id)
 products.delete(one.id)
 ```
+
+`find_where` takes a dict:
+
+```python
+active = products.find_where({"status": ProductStatus.Active, "price__lt": Decimal("10")})
+some = products.find_where({"id": [a, b, c]}, order_by="-created_at", limit=20)
+none = products.find_where({"org_id": None})           # IS NULL
+n = products.count_where({"slug__like": "dove%"})
+```
+
+Keys are column names. An operator follows a double underscore —
+`lt`, `lte`, `gt`, `gte`, `ne`, `like`, `in` — and a bare key is `=`.
+`None` is `IS NULL`, or `IS NOT NULL` under `__ne`; a list is `= ANY`.
+`order_by` is a column name or a list of them, `-name` for descending,
+with `limit` and `offset` beside it. Each value is read as its column's
+own type, so a `uuid` column takes a `uuid.UUID` and refuses a `str`
+with a `TypeError`; a key that is not a column is a `KeyError` before
+anything is sent. A column whose type does not cross — an array, a
+composite, a type from `[generate.types]` — cannot be queried from
+Python and says so by name.
 
 The [children](#children) loaders come too. Python has no `&mut`, so
 `load_children` hands back the row with the field filled rather than

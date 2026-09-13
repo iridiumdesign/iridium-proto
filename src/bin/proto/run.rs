@@ -140,8 +140,8 @@ async fn run(
                     let feature = python.map(|_| opts.generate.pyo3_feature.as_str());
                     let bridge = pyo3.then_some(opts.generate.pyo3_feature.as_str());
                     write_schema(
-                        journal, &models, schema, &opts, dir, mappers, feature, bridge, *prune,
-                        *no_mod, *force,
+                        journal, &models, schema, &opts, dir, mappers, feature, bridge, true,
+                        *prune, *no_mod, *force,
                     )?;
                     sync_manifest(cli, journal, &models, &opts, dir, mappers.is_some())
                 }
@@ -187,6 +187,7 @@ async fn run(
                 let mut opts = opts.clone();
                 opts.model_path = format!("{}::{module}", cli.model_path);
                 opts.bridge_path = "super::super::python".to_string();
+                opts.query_path = "super::super::query".to_string();
                 // Models and mappers split by schema; migrations all land
                 // in the one directory, numbered in sequence.
                 let per_schema = mappers.map(|(dir, migrations)| (dir.join(&module), migrations));
@@ -202,6 +203,7 @@ async fn run(
                     per_schema.as_ref().map(|(d, m)| (d.as_path(), *m)),
                     None,
                     None,
+                    false,
                     *prune,
                     *no_mod,
                     *force,
@@ -240,13 +242,24 @@ async fn run(
                 journal.write(&dir.join("python.rs"), &code, *force)?;
             }
 
+            // The query builder, likewise once at the root, and declared
+            // in the mappers' module list only.
+            let mut mapper_modules = written.clone();
+            if let Some((dir, _)) = mappers
+                && !written.is_empty()
+            {
+                let code = render::query::query_file(&opts);
+                journal.write(&dir.join("query.rs"), &code, *force)?;
+                mapper_modules.push("query".to_string());
+            }
+
             if !*no_mod && !written.is_empty() {
                 let feature = python.map(|_| opts.generate.pyo3_feature.as_str());
                 let code = render::model::mod_file(&written, "database", &opts, feature);
                 journal.write(&out_dir.join("mod.rs"), &code, *force)?;
                 if let Some((dir, _)) = mappers {
                     let bridge = pyo3.then_some(opts.generate.pyo3_feature.as_str());
-                    let code = render::model::mod_file(&written, "database", &opts, bridge);
+                    let code = render::model::mod_file(&mapper_modules, "database", &opts, bridge);
                     journal.write(&dir.join("mod.rs"), &code, *force)?;
                 }
             }
@@ -295,6 +308,7 @@ fn options<'a>(
         name_override,
         command: command_line(cli),
         bridge_path: "super::python".to_string(),
+        query_path: "super::query".to_string(),
     }
 }
 
@@ -464,6 +478,7 @@ fn write_schema(
     mappers: Option<(&Path, Option<Migrations>)>,
     python: Option<&str>,
     bridge: Option<&str>,
+    query: bool,
     prune: bool,
     no_mod: bool,
     force: bool,
@@ -529,6 +544,14 @@ fn write_schema(
             }];
             let code = render::python::bridge_file(&groups, opts);
             journal.write(&mapper_dir.join("python.rs"), &code, force)?;
+        }
+        // The query builder every mapper's `find_where` takes. Like the
+        // bridge, it is written once: beside the mappers here, or at
+        // the root by a database run, which passes `false`.
+        if query {
+            let code = render::query::query_file(opts);
+            journal.write(&mapper_dir.join("query.rs"), &code, force)?;
+            written.push("query".to_string());
         }
         if !no_mod {
             let code = render::model::mod_file(&written, schema, opts, bridge);

@@ -22,6 +22,7 @@ pub mod mapper;
 pub mod model;
 pub mod plan;
 pub mod python;
+pub mod query;
 pub mod sql;
 
 /// Which SQL the mapper runs.
@@ -59,6 +60,9 @@ pub struct Opts<'a> {
     /// from the mapper file: `super::python` beside it, or
     /// `super::super::python` when the mappers are split by schema.
     pub bridge_path: String,
+    /// Module the mappers import the query builder from: `super::query`
+    /// beside them, `super::super::query` from a per-schema directory.
+    pub query_path: String,
 }
 
 /// Generated source, plus anything the caller should hear about.
