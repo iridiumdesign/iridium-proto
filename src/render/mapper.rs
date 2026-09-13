@@ -88,7 +88,15 @@ impl<'a> {row}Mapper<'a> {{
     code.push_str(&methods);
     code.push_str("}\n");
     if opts.pyo3 {
-        code.push_str(&python_block(opts, &ops, &children.fields, &row, &input));
+        code.push_str(&python_block(
+            table,
+            opts,
+            &ops,
+            &children.fields,
+            &row,
+            &input,
+            &mut warnings,
+        ));
     }
 
     Rendered { code, warnings }
@@ -104,11 +112,13 @@ impl<'a> {row}Mapper<'a> {{
 /// the owned notice, so [`crate::reconcile`] treats the block exactly as
 /// it treats the Rust one above it.
 fn python_block(
+    table: &Table,
     opts: &Opts,
     ops: &[Operation],
     children: &[ChildField],
     row: &str,
     input: &str,
+    warnings: &mut Vec<String>,
 ) -> String {
     let feature = &opts.generate.pyo3_feature;
     let bridge = &opts.bridge_path;
@@ -119,7 +129,10 @@ fn python_block(
         methods.push_str(&indent(&python_method(op, opts, row, input), 4));
     }
     for child in children {
-        methods.push_str(&indent(&python_child_methods(child, ops, opts, row), 4));
+        methods.push_str(&indent(
+            &python_child_methods(table, child, ops, opts, row, warnings),
+            4,
+        ));
     }
 
     format!(
@@ -214,13 +227,26 @@ fn python_method(op: &Operation, opts: &Opts, row: &str, input: &str) -> String 
 /// Rust one as any other finder is wrapped. The same collision rule as
 /// [`child_methods`] decides whether the finder exists at all, so the
 /// two surfaces agree.
-fn python_child_methods(child: &ChildField, ops: &[Operation], opts: &Opts, row: &str) -> String {
+///
+/// Handing back a copy needs `Clone` on the row. The default derives
+/// give it; a configuration that dropped it gets the finder, a warning,
+/// and no loader, rather than a wrapper that does not compile.
+fn python_child_methods(
+    table: &Table,
+    child: &ChildField,
+    ops: &[Operation],
+    opts: &Opts,
+    row: &str,
+    warnings: &mut Vec<String>,
+) -> String {
     let bridge = &opts.bridge_path;
     let (field, stem) = (&child.field, &child.stem);
     let (c_schema, c_table) = (&child.child.schema, &child.child.table);
 
-    let mut out = format!(
-        r#"
+    let mut out = String::new();
+    if opts.generate.derives.iter().any(|d| d == "Clone") {
+        out.push_str(&format!(
+            r#"
 /// The row with `{field}` loaded: every `{c_schema}.{c_table}` row that
 /// refers to it. Hands back a filled copy rather than changing the row
 /// it was given.
@@ -238,7 +264,14 @@ fn python_child_methods(child: &ChildField, ops: &[Operation], opts: &Opts, row:
     }})
 }}
 "#
-    );
+        ));
+    } else {
+        warnings.push(format!(
+            "{}.{}: `load_{stem}` needs `Clone` in [generate] derives to hand a \
+             row back to Python; the Python class gets no loader for `{field}`",
+            table.schema, table.name
+        ));
+    }
 
     if let Some((key, wrapper)) = finder_wrapper(ops, stem) {
         let (params, args) = python_arguments(&key.columns, opts);
@@ -945,6 +978,22 @@ mod tests {
         assert!(
             python.contains("super::python::run(db, py, mapper.find_by_id_with_children(id))"),
             "{python}"
+        );
+
+        // Without `Clone` there is no copy to hand back: the finder stays,
+        // the loader goes, and the run says why.
+        let mut generate = Generate::default();
+        generate.derives.retain(|d| d != "Clone");
+        let mut opts = fixture::opts(&generate, Strategy::Embedded);
+        opts.pyo3 = true;
+        let rendered = mapper_file(&fixture::product(), &opts);
+        let python = &rendered.code[rendered.code.find("── Python").unwrap()..];
+        assert!(!python.contains("fn load_children("), "{python}");
+        assert!(python.contains("fn find_by_id_with_children("), "{python}");
+        assert!(
+            rendered.warnings.iter().any(|w| w.contains("`Clone`")),
+            "{:?}",
+            rendered.warnings
         );
 
         // The off switch takes both away, as it does on the Rust side.
