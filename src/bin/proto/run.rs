@@ -182,6 +182,15 @@ async fn run(
                     continue;
                 }
                 let module = naming::ident(&schema);
+                // The mapper root holds proto's own `query.rs`, and the
+                // bridge under `--pyo3`; a schema directory of either
+                // name would declare the same module twice.
+                if mappers.is_some() && (module == "query" || (*pyo3 && module == "python")) {
+                    return Err(Error::Usage(format!(
+                        "schema {schema} would be a module proto writes at the mapper \
+                         root itself; exclude it with exclude_schemas"
+                    )));
+                }
                 // proto chose these directory names, so it also knows the
                 // module path the mappers must import their models from.
                 let mut opts = opts.clone();
@@ -517,6 +526,19 @@ fn write_schema(
     }
 
     if let Some((mapper_dir, migrations)) = mappers {
+        // `query.rs` and `python.rs` are proto's own files here, so a
+        // table that would take either name is refused up front rather
+        // than written over.
+        let mut reserved = vec!["query"];
+        if bridge.is_some() {
+            reserved.push("python");
+        }
+        if let Some(table) = render::reserved_module(models, &reserved) {
+            return Err(Error::Usage(format!(
+                "table {table} would be a module proto writes beside the mappers \
+                 itself; exclude it with exclude_tables or rename it"
+            )));
+        }
         let mut written = Vec::new();
         for model in models {
             let rendered = render::mapper::mapper_file(model, opts);

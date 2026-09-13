@@ -42,6 +42,22 @@ impl Op {
             _ => return None,
         })
     }
+
+    /// The suffix that names this operator in a key, for a message.
+    pub fn suffix(self) -> &'static str {
+        match self {
+            Self::Eq => "eq",
+            Self::Ne => "ne",
+            Self::Lt => "lt",
+            Self::Lte => "lte",
+            Self::Gt => "gt",
+            Self::Gte => "gte",
+            Self::Like => "like",
+            Self::Any => "in",
+            Self::IsNull => "isnull",
+            Self::IsNotNull => "notnull",
+        }
+    }
 }
 
 /// One condition, with whether it took a placeholder.

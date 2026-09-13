@@ -41,7 +41,6 @@ pub fn mapper_file(model: &Model, opts: &Opts) -> Rendered {
 
     let mut imports = BTreeSet::new();
     imports.insert("sqlx::PgPool".to_string());
-    imports.insert(format!("{}::Query", opts.query_path));
     imports.insert(format!("{}::{module}::{row}", opts.model_path));
     if ops.iter().any(|o| o.kind == Kind::Insert) {
         imports.insert(format!("{}::{module}::{input}", opts.model_path));
@@ -62,7 +61,7 @@ pub fn mapper_file(model: &Model, opts: &Opts) -> Rendered {
             4,
         ));
     }
-    methods.push_str(&indent(&where_methods(table, &row), 4));
+    methods.push_str(&indent(&where_methods(table, opts, &row), 4));
 
     let mut code = header(
         opts,
@@ -213,6 +212,7 @@ fn find_where(
 /// proto's to vouch for, is refused by name.
 fn python_query_fn(table: &Table, opts: &Opts) -> String {
     let bridge = &opts.bridge_path;
+    let query = format!("{}::Query", opts.query_path);
     let feature = &opts.generate.pyo3_feature;
     // Named in two string literals below, so escaped for them.
     let relation = escape(&format!("{}.{}", table.schema, table.name));
@@ -240,7 +240,7 @@ fn query_from_python(
     order_by: Option<&pyo3::Bound<'_, pyo3::PyAny>>,
     limit: Option<i64>,
     offset: Option<i64>,
-) -> pyo3::PyResult<Query> {{
+) -> pyo3::PyResult<{query}> {{
     {bridge}::query(conditions, order_by, limit, offset, |query, column, op, value| {{
         match column {{
 {arms}            _ => Err({bridge}::no_column("{relation}", column)),
@@ -278,8 +278,9 @@ fn python_bindable(column: &Column, module: &str, opts: &Opts) -> Option<String>
     }
     // Only what pyo3's conversions cover: the numbers, text, and the
     // uuid, decimal and chrono types its features turn on.
-    const CROSSES: [&str; 13] = [
+    const CROSSES: [&str; 14] = [
         "bool",
+        "i8",
         "i16",
         "i32",
         "i64",
@@ -680,7 +681,10 @@ fn child_methods(
 /// columns the caller chooses and no fixed function can take that.
 /// Every value is still bound, and the column list the `Query` is
 /// checked against is written here, where a regeneration corrects it.
-fn where_methods(table: &Table, row: &str) -> String {
+fn where_methods(table: &Table, opts: &Opts, row: &str) -> String {
+    // Named in full rather than imported: a table named `query` has a
+    // row type `Query` of its own, and the two must not meet.
+    let query = format!("{}::Query", opts.query_path);
     let relation = escape(&quoting::qualified(&table.schema, &table.name));
     let qualified = format!("{}.{}", table.schema, table.name);
     let columns: Vec<String> = table
@@ -704,14 +708,14 @@ fn where_methods(table: &Table, row: &str) -> String {
 /// columns at run time, and no function can take that. Every value is
 /// still bound, never written into the statement, and a name that is
 /// not a column of `{qualified}` is an error before anything is sent.
-{OWNED}pub async fn find_where(&self, query: Query) -> Result<Vec<{row}>, sqlx::Error> {{
+{OWNED}pub async fn find_where(&self, query: {query}) -> Result<Vec<{row}>, sqlx::Error> {{
     let (sql, args) = query.select("{relation}", Self::columns())?;
     sqlx::query_as_with(&sql, args).fetch_all(self.pool).await
 }}
 
 /// How many rows match `query`. Its order, limit and offset do not
 /// apply.
-{OWNED}pub async fn count_where(&self, query: Query) -> Result<i64, sqlx::Error> {{
+{OWNED}pub async fn count_where(&self, query: {query}) -> Result<i64, sqlx::Error> {{
     let (sql, args) = query.count("{relation}", Self::columns())?;
     sqlx::query_scalar_with(&sql, args).fetch_one(self.pool).await
 }}
@@ -1161,17 +1165,18 @@ mod tests {
     fn a_query_finds_and_counts_under_both_strategies() {
         for strategy in [Strategy::Embedded, Strategy::Server] {
             let out = render(strategy);
-            assert!(out.contains("use super::query::Query;"), "{out}");
+            // Named in full: a table named `query` has a `Query` of its own.
+            assert!(!out.contains("use super::query::Query;"), "{out}");
             assert!(
                 out.contains(
-                    "    pub async fn find_where(&self, query: Query) -> \
+                    "    pub async fn find_where(&self, query: super::query::Query) -> \
                      Result<Vec<Product>, sqlx::Error> {\n        \
                      let (sql, args) = query.select(\"shop.product\", Self::columns())?;"
                 ),
                 "{out}"
             );
             assert!(
-                out.contains("    pub async fn count_where(&self, query: Query) -> Result<i64, sqlx::Error> {"),
+                out.contains("    pub async fn count_where(&self, query: super::query::Query) -> Result<i64, sqlx::Error> {"),
                 "{out}"
             );
             // The column list is what the query is checked against, and
@@ -1181,6 +1186,21 @@ mod tests {
                 "{out}"
             );
         }
+    }
+
+    #[test]
+    fn a_table_that_would_take_a_reserved_module_name_is_named() {
+        let mut query = fixture::product();
+        query.table.name = "Query".into();
+        let models = [fixture::product(), query];
+        assert_eq!(
+            crate::render::reserved_module(&models, &["query", "python"]).as_deref(),
+            Some("shop.Query")
+        );
+        assert_eq!(
+            crate::render::reserved_module(&models[..1], &["query", "python"]),
+            None
+        );
     }
 
     #[test]

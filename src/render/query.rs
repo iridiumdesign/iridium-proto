@@ -142,6 +142,9 @@ mod tests {
         assert_eq!(sql, "SELECT * FROM t WHERE id >= $1 AND id IS NULL");
         assert_eq!(Op::from_suffix("in"), Some(Op::Any));
         assert_eq!(Op::from_suffix("between"), None);
+        for suffix in ["eq", "ne", "lt", "lte", "gt", "gte", "like", "in"] {
+            assert_eq!(Op::from_suffix(suffix).unwrap().suffix(), suffix);
+        }
     }
 
     #[test]

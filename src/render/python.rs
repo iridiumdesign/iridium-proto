@@ -339,8 +339,11 @@ where
         return match op {{
             Op::Eq => Ok(query.null(column)),
             Op::Ne => Ok(query.not_null(column)),
-            _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "`{{column}}`: None takes no operator but `ne`"
+            other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "`{{column}}__{{}}`: None is `IS NULL` under a bare key or \
+                 `IS NOT NULL` under `__ne`; `__{{}}` cannot take it",
+                other.suffix(),
+                other.suffix()
             ))),
         }};
     }}
@@ -348,10 +351,18 @@ where
         let values: Vec<T> = list.extract()?;
         return match op {{
             Op::Eq | Op::Any => Ok(query.any(column, values)),
-            _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "`{{column}}`: a list takes no operator but `in`"
+            other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "`{{column}}__{{}}`: a list is `= ANY` under a bare key or \
+                 `__in`; `__{{}}` cannot take it",
+                other.suffix(),
+                other.suffix()
             ))),
         }};
+    }}
+    if op == Op::Any {{
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "`{{column}}__in` takes a list"
+        )));
     }}
     let value: T = value.extract()?;
     Ok(query.cond(column, op, value))

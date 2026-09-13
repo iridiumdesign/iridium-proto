@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::Generate;
 use crate::introspect::{Model, PgComposite, PgEnum};
+use crate::naming;
 
 pub mod children;
 #[cfg(test)]
@@ -263,6 +264,17 @@ pub fn uses_types(models: &[Model]) -> bool {
     models
         .iter()
         .any(|m| !m.enums.is_empty() || !m.composites.is_empty())
+}
+
+/// The first table among `models` whose module would be one proto
+/// writes beside the mappers itself — `query` for the builder, `python`
+/// for the bridge — as `schema.table`. Two files cannot share a name,
+/// so a bulk run refuses such a table before writing anything.
+pub fn reserved_module(models: &[Model], reserved: &[&str]) -> Option<String> {
+    models
+        .iter()
+        .find(|m| reserved.contains(&naming::ident(&m.table.name).as_str()))
+        .map(|m| format!("{}.{}", m.table.schema, m.table.name))
 }
 
 /// sqlx matches the type name the server reports. A type outside `public`

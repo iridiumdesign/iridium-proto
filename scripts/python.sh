@@ -370,6 +370,13 @@ except TypeError:
     pass
 else:
     raise AssertionError("an array column did not say it cannot cross")
+for bad in ({"id__in": made.id}, {"price__lt": None}, {"id__lt": [made.id]}):
+    try:
+        items.find_where(bad)
+    except ValueError as e:
+        assert "__" in str(e), str(e)
+    else:
+        raise AssertionError(f"{bad} was not refused before the database saw it")
 print("  queries from a dict")
 both = items.find_by_id_with_children(made.id)
 assert both is not None and len(both.children) == 1, both
