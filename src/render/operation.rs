@@ -36,8 +36,18 @@ const YOURS: &str = "\
 
 ";
 
+/// An identifier for composing a longer one: `naming::ident` without
+/// the `r#` a keyword gets, which has no place inside a name.
+fn bare_ident(name: &str) -> String {
+    naming::ident(name).trim_start_matches("r#").to_string()
+}
+
 /// `data.rs`: the `Data` operation over every table in `sources`.
-pub fn data_file(sources: &[Source], opts: &Opts) -> Rendered {
+///
+/// `aliases` says whether a table also routes by its bare name where
+/// only one table has it: a schema run does, a database run names
+/// every table by its schema.
+pub fn data_file(sources: &[Source], opts: &Opts, aliases: bool) -> Rendered {
     let schemas = sources
         .iter()
         .map(|s| s.schema.as_str())
@@ -60,22 +70,29 @@ pub fn data_file(sources: &[Source], opts: &Opts) -> Rendered {
     let mut arms = String::new();
     let mut handlers = String::new();
     let mut needs_values = false;
+    let mut needs_fixed = false;
     let mut needs_cannot = false;
+    let mut taken = std::collections::BTreeSet::new();
     for source in sources {
         for model in source.models {
             let table = &model.table;
             let ops = plan::operations(table);
             let has = |kind: Kind| ops.iter().any(|op| op.kind == kind);
             needs_values |= has(Kind::Insert) || has(Kind::Update);
+            needs_fixed |= has(Kind::Update);
             needs_cannot |= !(has(Kind::Insert) && has(Kind::Update) && has(Kind::Delete));
-            let handler = format!(
-                "{}_{}",
-                naming::ident(&table.schema),
-                naming::ident(&table.name)
-            );
+            // `foo_bar.baz` and `foo.bar_baz` compose the same name; the
+            // second to arrive takes a number.
+            let base = format!("{}_{}", bare_ident(&table.schema), bare_ident(&table.name));
+            let mut handler = base.clone();
+            let mut n = 2;
+            while !taken.insert(handler.clone()) {
+                handler = format!("{base}_{n}");
+                n += 1;
+            }
             let qualified = escape(&format!("{}.{}", table.schema, table.name));
             let mut pattern = format!("\"{qualified}\"");
-            if bare[table.name.as_str()] == 1 {
+            if aliases && bare[table.name.as_str()] == 1 {
                 pattern.push_str(&format!(" | \"{}\"", escape(&table.name)));
             }
             arms.push_str(&format!(
@@ -86,29 +103,46 @@ pub fn data_file(sources: &[Source], opts: &Opts) -> Rendered {
     }
 
     // Only what some handler calls, or the file warns under the feature.
-    let values_fn = if needs_values {
-        r#"/// The `values` an operation needs.
-fn values<'r, 'py>(request: &'r Request<'py>, op: &str) -> PyResult<&'r Bound<'py, PyDict>> {
+    // Methods rather than free functions, so that when the tables change
+    // and one is no longer called, reconcile takes it back.
+    let mut helpers = String::new();
+    if needs_values {
+        helpers.push_str(&format!(
+            r#"
+/// The `values` an operation needs.
+{OWNED}fn values<'r, 'py>(request: &'r Request<'py>, op: &str) -> PyResult<&'r Bound<'py, PyDict>> {{
     request
         .values
         .as_ref()
-        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("`{op}` needs `values`")))
-}
-
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("`{{op}}` needs `values`")))
+}}
 "#
-    } else {
-        ""
-    };
-    let cannot_fn = if needs_cannot {
-        r#"/// `ValueError`: the table has no such operation.
-fn cannot(table: &str, op: &str) -> PyErr {
-    pyo3::exceptions::PyValueError::new_err(format!("{table} has no `{op}`"))
-}
-
+        ));
+    }
+    if needs_fixed {
+        helpers.push_str(&format!(
+            r#"
+/// `ValueError`: `update` cannot set the column — it is the table's
+/// key, or the database's own.
+{OWNED}fn fixed(table: &str, column: &str) -> PyErr {{
+    pyo3::exceptions::PyValueError::new_err(format!(
+        "`{{column}}` of {{table}} is its key or the database's own; `update` cannot set it"
+    ))
+}}
 "#
-    } else {
-        ""
-    };
+        ));
+    }
+    if needs_cannot {
+        helpers.push_str(&format!(
+            r#"
+/// `ValueError`: the table has no such operation.
+{OWNED}fn cannot(table: &str, op: &str) -> PyErr {{
+    pyo3::exceptions::PyValueError::new_err(format!("{{table}} has no `{{op}}`"))
+}}
+"#
+        ));
+    }
+    let helpers = indent(&helpers, 4);
 
     code.push_str(&format!(
         r#"use pyo3::prelude::*;
@@ -213,7 +247,7 @@ fn given<'py>(request: &Bound<'py, PyDict>, key: &str) -> PyResult<Option<Bound<
     Ok(request.get_item(key)?.filter(|v| !v.is_none()))
 }}
 
-{values_fn}{cannot_fn}/// The routing table, and one handler per table behind it.
+/// The routing table, and one handler per table behind it.
 struct Routes;
 
 impl Routes {{
@@ -233,7 +267,7 @@ impl Routes {{
             ))),
         }}
     }}
-{handlers}}}
+{helpers}{handlers}}}
 
 /// Register `Data` on a module. Call it after the mappers' `register`,
 /// which puts the `Database` it takes and the classes it returns there.
@@ -263,7 +297,7 @@ fn handler_fn(model: &Model, source: &Source, handler: &str, opts: &Opts) -> Str
     let create = if has(Kind::Insert) {
         format!(
             r#"        Op::Create => {{
-            let values = values(request, "create")?;
+            let values = Self::values(request, "create")?;
             let new: {model_path}::New{row} = py
                 .get_type::<{model_path}::New{row}>()
                 .call((), Some(values))?
@@ -274,20 +308,40 @@ fn handler_fn(model: &Model, source: &Source, handler: &str, opts: &Opts) -> Str
 "#
         )
     } else {
-        format!("        Op::Create => Err(cannot(\"{qualified}\", \"create\")),\n")
+        format!("        Op::Create => Err(Self::cannot(\"{qualified}\", \"create\")),\n")
     };
 
     let update = if has(Kind::Update) {
+        // What `update` writes is what the mapper's `update` writes;
+        // the key addresses the row and the rest is the database's.
+        let updatable = table.update_columns();
+        let fixed: Vec<String> = table
+            .columns
+            .iter()
+            .filter(|c| !updatable.iter().any(|u| u.name == c.name))
+            .map(|c| format!("\"{}\"", escape(&c.name)))
+            .collect();
+        let refuse = if fixed.is_empty() {
+            String::new()
+        } else {
+            format!(
+                r#"                    if matches!(key.to_str()?, {}) {{
+                        return Err(Self::fixed("{qualified}", key.to_str()?));
+                    }}
+"#,
+                fixed.join(" | ")
+            )
+        };
         format!(
             r#"        Op::Update => {{
-            let values = values(request, "update")?;
+            let values = Self::values(request, "update")?;
             let rows = run(db, py, mapper.find_where(conditions()?))?;
             let mut updated = Vec::with_capacity(rows.len());
             for row in rows {{
                 let object = Py::new(py, row)?;
                 for (key, value) in values.iter() {{
                     let key = key.downcast_into::<pyo3::types::PyString>()?;
-                    object.bind(py).setattr(&key, value)?;
+{refuse}                    object.bind(py).setattr(&key, value)?;
                 }}
                 let row: {model_path}::{row} = object.extract(py)?;
                 updated.push(run(db, py, mapper.update(&row))?);
@@ -297,7 +351,7 @@ fn handler_fn(model: &Model, source: &Source, handler: &str, opts: &Opts) -> Str
 "#
         )
     } else {
-        format!("        Op::Update => Err(cannot(\"{qualified}\", \"update\")),\n")
+        format!("        Op::Update => Err(Self::cannot(\"{qualified}\", \"update\")),\n")
     };
 
     let delete = if has(Kind::Delete) {
@@ -306,13 +360,12 @@ fn handler_fn(model: &Model, source: &Source, handler: &str, opts: &Opts) -> Str
             .iter()
             .map(|c| {
                 let field = naming::ident(&c.name);
-                // Borrowed where the mapper borrows: text and arrays.
-                match &c.ty {
-                    crate::introspect::PgType::Array(_) => format!("&row.{field}"),
-                    _ if crate::typemap::map(&c.ty, opts.generate).text == "String" => {
-                        format!("&row.{field}")
-                    }
-                    _ => format!("row.{field}"),
+                // Borrowed exactly where the mapper's signature borrows.
+                let mapped = crate::typemap::map(&c.ty, opts.generate);
+                if super::mapper::param_type(&mapped.text).starts_with('&') {
+                    format!("&row.{field}")
+                } else {
+                    format!("row.{field}")
                 }
             })
             .collect::<Vec<_>>()
@@ -329,7 +382,7 @@ fn handler_fn(model: &Model, source: &Source, handler: &str, opts: &Opts) -> Str
 "#
         )
     } else {
-        format!("        Op::Delete => Err(cannot(\"{qualified}\", \"delete\")),\n")
+        format!("        Op::Delete => Err(Self::cannot(\"{qualified}\", \"delete\")),\n")
     };
 
     format!(
@@ -390,7 +443,7 @@ mod tests {
         let generate = Generate::default();
         let mut opts = fixture::opts(&generate, Strategy::Embedded);
         opts.pyo3 = true;
-        data_file(&[shop(models)], &opts).code
+        data_file(&[shop(models)], &opts, true).code
     }
 
     #[test]
@@ -444,7 +497,7 @@ mod tests {
                 model_path: "crate::model::outlet".into(),
             },
         ];
-        let out = data_file(&sources, &opts).code;
+        let out = data_file(&sources, &opts, true).code;
         assert!(
             out.contains("        \"shop.product\" => Self::shop_product(py, db, request),"),
             "{out}"
@@ -458,6 +511,72 @@ mod tests {
             out.contains("crate::mapper::outlet::product::ProductMapper"),
             "{out}"
         );
+
+        // A database run names every table by its schema, however
+        // unambiguous the bare name would be.
+        let out = data_file(&sources[..1], &opts, false).code;
+        assert!(
+            out.contains("        \"shop.product\" => Self::shop_product(py, db, request),"),
+            "{out}"
+        );
+        assert!(!out.contains("| \"product\""), "{out}");
+    }
+
+    #[test]
+    fn handler_names_cannot_collide_and_carry_no_raw_prefix() {
+        let mut a = fixture::product();
+        a.table.schema = "foo_bar".into();
+        a.table.name = "baz".into();
+        let mut b = fixture::product();
+        b.table.schema = "foo".into();
+        b.table.name = "bar_baz".into();
+        let mut keyword = fixture::product();
+        keyword.table.name = "type".into();
+        let models = [a, b, keyword];
+        let out = render(&models);
+        syn::parse_file(&out).expect("data.rs parses");
+        assert!(
+            out.contains("=> Self::foo_bar_baz(py, db, request),"),
+            "{out}"
+        );
+        assert!(
+            out.contains("=> Self::foo_bar_baz_2(py, db, request),"),
+            "{out}"
+        );
+        assert!(out.contains("    fn foo_bar_baz_2("), "{out}");
+        assert!(
+            out.contains("=> Self::shop_type(py, db, request),"),
+            "{out}"
+        );
+        // `r#where` is a field and `r#type` a module path; the handler
+        // name itself must not carry the prefix.
+        assert!(!out.contains("shop_r#"), "{out}");
+    }
+
+    #[test]
+    fn update_refuses_the_key_and_what_the_database_owns() {
+        let out = render(&[fixture::product()]);
+        // shop.product: `id` has a server default, `created_at` too.
+        assert!(
+            out.contains("if matches!(key.to_str()?, \"id\" | \"created_at\") {"),
+            "{out}"
+        );
+        assert!(
+            out.contains("    fn fixed(table: &str, column: &str) -> PyErr {"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_table_named_data_would_shadow_the_class() {
+        let mut data = fixture::product();
+        data.table.name = "data".into();
+        let models = [fixture::product(), data];
+        assert_eq!(
+            crate::render::reserved_class(&models, "Data").as_deref(),
+            Some("table shop.data")
+        );
+        assert_eq!(crate::render::reserved_class(&models[..1], "Data"), None);
     }
 
     #[test]
@@ -468,25 +587,27 @@ mod tests {
         let models = [view];
         let out = render(&models);
         assert!(
-            out.contains("Op::Create => Err(cannot(\"shop.catalog\", \"create\")),"),
+            out.contains("Op::Create => Err(Self::cannot(\"shop.catalog\", \"create\")),"),
             "{out}"
         );
         assert!(
-            out.contains("Op::Update => Err(cannot(\"shop.catalog\", \"update\")),"),
+            out.contains("Op::Update => Err(Self::cannot(\"shop.catalog\", \"update\")),"),
             "{out}"
         );
         assert!(
-            out.contains("Op::Delete => Err(cannot(\"shop.catalog\", \"delete\")),"),
+            out.contains("Op::Delete => Err(Self::cannot(\"shop.catalog\", \"delete\")),"),
             "{out}"
         );
         assert!(out.contains("Op::Find => {"), "{out}");
         // A file over views alone has nothing to read `values` for, and
         // one over full tables nothing to refuse: neither helper is
         // written unused, which would warn under the feature.
-        assert!(out.contains("fn cannot("), "{out}");
+        assert!(out.contains("    fn cannot("), "{out}");
         assert!(!out.contains("fn values<"), "{out}");
+        assert!(!out.contains("fn fixed("), "{out}");
         let full = render(&[fixture::product()]);
-        assert!(full.contains("fn values<"), "{full}");
+        assert!(full.contains("    fn values<"), "{full}");
+        assert!(full.contains("    fn fixed("), "{full}");
         assert!(!full.contains("fn cannot("), "{full}");
     }
 

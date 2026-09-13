@@ -129,7 +129,20 @@ async fn run(
             let opts = options(cli, generate, target, *pyo3, *mappers, None);
             match out_dir {
                 Some(dir) => {
+                    // Every target is resolved before anything is written,
+                    // so a missing flag fails before it leaves half a tree.
                     let mappers = mapper_target(cli, generate, *mappers, mapper_dir.as_deref())?;
+                    let operation_dir = operation_target(
+                        *operations,
+                        operation_dir.as_deref(),
+                        mappers.is_some(),
+                        *pyo3,
+                    )?;
+                    if operation_dir.is_some()
+                        && let Some(taken) = render::reserved_class(&models, "Data")
+                    {
+                        return Err(reserved_data(&taken));
+                    }
                     let python = python_target(pymodule.as_deref(), *pyo3)?;
                     if let Some(name) = python {
                         let groups = [Group {
@@ -146,12 +159,7 @@ async fn run(
                         journal, &models, schema, &opts, dir, mappers, feature, bridge, true,
                         *prune, *no_mod, *force,
                     )?;
-                    if let Some(operation_dir) = operation_target(
-                        *operations,
-                        operation_dir.as_deref(),
-                        mappers.is_some(),
-                        *pyo3,
-                    )? {
+                    if let Some(operation_dir) = operation_dir {
                         let sources = [Source {
                             schema: schema.clone(),
                             models: &models,
@@ -163,6 +171,7 @@ async fn run(
                             &sources,
                             &opts,
                             operation_dir,
+                            true,
                             *prune,
                             *no_mod,
                             *force,
@@ -172,6 +181,9 @@ async fn run(
                 }
                 None if *mappers => Err(Error::Usage(
                     "--mappers needs --out-dir and --mapper-dir".to_string(),
+                )),
+                None if *operations => Err(Error::Usage(
+                    "--operations needs --out-dir, --mapper-dir and --operation-dir".to_string(),
                 )),
                 None => emit(
                     journal,
@@ -196,6 +208,12 @@ async fn run(
         } => {
             let opts = options(cli, generate, target, *pyo3, *mappers, None);
             let mappers = mapper_target(cli, generate, *mappers, mapper_dir.as_deref())?;
+            let operation_dir = operation_target(
+                *operations,
+                operation_dir.as_deref(),
+                mappers.is_some(),
+                *pyo3,
+            )?;
             let python = python_target(pymodule.as_deref(), *pyo3)?;
             let mut written = Vec::new();
             let mut groups = Vec::new();
@@ -207,6 +225,11 @@ async fn run(
                 let models = read_schema(pool, &schema, generate).await?;
                 if models.is_empty() {
                     continue;
+                }
+                if operation_dir.is_some()
+                    && let Some(taken) = render::reserved_class(&models, "Data")
+                {
+                    return Err(reserved_data(&taken));
                 }
                 let module = naming::ident(&schema);
                 // The mapper root holds proto's own `query.rs`, and the
@@ -301,12 +324,7 @@ async fn run(
             }
             // One Data over every schema, at the root, every table
             // qualified by its schema.
-            if let Some(operation_dir) = operation_target(
-                *operations,
-                operation_dir.as_deref(),
-                mappers.is_some(),
-                *pyo3,
-            )? {
+            if let Some(operation_dir) = operation_dir {
                 let sources: Vec<Source> = groups
                     .iter()
                     .map(|(schema, module, models)| Source {
@@ -321,6 +339,7 @@ async fn run(
                     &sources,
                     &opts,
                     operation_dir,
+                    false,
                     *prune,
                     *no_mod,
                     *force,
@@ -512,17 +531,27 @@ fn operation_target(
         .ok_or_else(|| Error::Usage("--operations needs --operation-dir".to_string()))
 }
 
+/// A table, enum or composite would take the Python name `Data` needs.
+fn reserved_data(taken: &str) -> Error {
+    Error::Usage(format!(
+        "{taken} would be the Python class `Data`, which the operation needs for \
+         itself; exclude or rename it, or leave --operations off"
+    ))
+}
+
 /// Write `data.rs` and the module list into `dir`.
+#[allow(clippy::too_many_arguments)]
 fn write_operations(
     journal: &mut Journal,
     sources: &[Source],
     opts: &Opts,
     dir: &Path,
+    aliases: bool,
     prune: bool,
     no_mod: bool,
     force: bool,
 ) -> Result<()> {
-    let rendered = operation::data_file(sources, opts);
+    let rendered = operation::data_file(sources, opts, aliases);
     for warning in &rendered.warnings {
         output::warn(warning);
     }

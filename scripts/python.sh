@@ -435,6 +435,8 @@ for bad, error in (
     ({"table": "item", "op": "find", "where": {"nope": 1}}, KeyError),
     ({"table": "item", "op": "update", "where": {"id": one.id},
       "values": {"slug": 5}}, TypeError),                        # the setter refuses
+    ({"table": "item", "op": "update", "where": {"id": one.id},
+      "values": {"id": uuid.uuid4()}}, ValueError),              # the key is fixed
 ):
     try:
         data.execute(bad)

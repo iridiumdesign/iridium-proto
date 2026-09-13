@@ -261,6 +261,32 @@ fn dedupe_composites(models: &[Model], generate: &Generate) -> Vec<PgComposite> 
     out
 }
 
+/// The first table, enum or composite among `models` whose Python class
+/// would be `name` — a name an operation's class needs for itself — as
+/// `table schema.table`, `enum schema.name` or `composite schema.name`.
+pub fn reserved_class(models: &[Model], name: &str) -> Option<String> {
+    for m in models {
+        if naming::pascal_case(&m.table.name) == name {
+            return Some(format!("table {}.{}", m.table.schema, m.table.name));
+        }
+        if let Some(e) = m
+            .enums
+            .iter()
+            .find(|e| naming::pascal_case(&e.name) == name)
+        {
+            return Some(format!("enum {}.{}", e.schema, e.name));
+        }
+        if let Some(c) = m
+            .composites
+            .iter()
+            .find(|c| naming::pascal_case(&c.name) == name)
+        {
+            return Some(format!("composite {}.{}", c.schema, c.name));
+        }
+    }
+    None
+}
+
 /// Whether any table references an enum or composite type — decides if a
 /// schema run needs an `enums.rs` at all. The file keeps its name from
 /// when enums were the only type it held; the composites live there too.

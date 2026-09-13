@@ -570,10 +570,13 @@ it. `op` is `find`, `count`, `create`, `update` or `delete`. `where`,
 takes. `values` is what `create` inserts, read through the `New…`
 constructor so the same columns are required, or what `update` sets on
 every row `where` finds, through the class's own setters so the same
-types are enforced. `find` and `update` return the rows, `create` the
-row, `count` and `delete` a number. A table that is not routed is a
+types are enforced. `update` writes what the mapper's `update` writes:
+the key addresses the row and cannot be set, nor can a column the
+database owns. `find` and `update` return the rows, `create` the row,
+`count` and `delete` a number. A table that is not routed is a
 `KeyError`; an operation a table cannot do — `create` on a view, `delete`
-on a table without a key — is a `ValueError` naming both.
+on a table without a key — is a `ValueError` naming both. A table whose
+class would be called `Data` is refused before anything is written.
 
 The routing table is one generated function, `route`, and it is not
 yours to edit: `proto` rewrites it whenever a table arrives or leaves,
@@ -594,7 +597,8 @@ fn shop(m: &Bound<'_, PyModule>) -> PyResult<()> {
 ```
 
 `proto database` writes one `Data` over every schema at the root of
-`--operation-dir`, with every table qualified.
+`--operation-dir`, with every table qualified; the bare name is a
+schema run's shorthand.
 
 ## Type mapping
 

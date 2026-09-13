@@ -867,7 +867,7 @@ fn arguments(columns: &[&Column], opts: &Opts, imports: &mut BTreeSet<String>) -
 
 /// The Rust type a lookup argument takes: borrowed where borrowing is the
 /// natural shape for a caller, by value otherwise.
-fn param_type(ty: &str) -> String {
+pub(crate) fn param_type(ty: &str) -> String {
     if ty == "String" {
         return "&str".to_string();
     }
