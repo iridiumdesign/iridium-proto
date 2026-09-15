@@ -402,7 +402,7 @@ macro_rules! round_trip {
             stray.bin_id = uuid::Uuid::nil();
             let mut with = with;
             with.item_children = vec![stray];
-            bins.set_id_on_children(&mut with);
+            with.set_id_on_children();
             assert_eq!(with.item_children[0].bin_id, bin.id, "{tag}: the key set on the child");
 
             // A tree: one table, both sides. One level only.
@@ -420,10 +420,20 @@ macro_rules! round_trip {
             assert_eq!(tree.category_children.len(), 1);
             assert_eq!(tree.category_children[0].id, leaf.id);
             assert!(tree.category_children[0].category_children.is_empty(), "one level");
-            // A tree's foreign key is nullable, so the key arrives as Some.
+            // A tree's foreign key is nullable, so the key arrives as Some,
+            // and it goes all the way down: a grandchild built in memory
+            // takes the leaf's key, not the root's.
+            let mut grand = tree.category_children[0].clone();
+            grand.parent_id = None;
             tree.category_children[0].parent_id = None;
-            categories.set_id_on_children(&mut tree);
+            tree.category_children[0].category_children = vec![grand];
+            tree.set_id_on_children();
             assert_eq!(tree.category_children[0].parent_id, Some(root.id), "{tag}: Some(key)");
+            assert_eq!(
+                tree.category_children[0].category_children[0].parent_id,
+                Some(leaf.id),
+                "{tag}: two levels down"
+            );
             categories.delete(leaf.id).await?;
             categories.delete(root.id).await?;
 

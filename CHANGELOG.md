@@ -14,12 +14,13 @@ class as a thin wrapper over it ([#17]). See the
 
 ### Added
 
-- `set_id_on_children` on every mapper: copies the parent's key into
-  every child row it holds, in memory, so a parent and its children
-  built by hand agree before a save. A nullable foreign key takes
-  `Some`; a key that is not `Copy` is cloned. A mapper with no children
-  fields has it too, doing nothing. The Python class hands back a keyed
-  copy, as its loaders do. ([#21])
+- `set_id_on_children` on every row type: copies the row's key into
+  every child row it holds and on down through theirs, in memory, so a
+  parent and its children built by hand agree before a save, however
+  deep. A nullable foreign key takes `Some`; a key that is not `Copy`
+  is cloned. A table with no children fields has it too, doing
+  nothing. Under `--pyo3` it is a method of the Python class and
+  changes the object in place. ([#21])
 
 ### Changed
 

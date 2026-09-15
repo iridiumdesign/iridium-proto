@@ -270,6 +270,17 @@ child.parent_id = it.id
 it.item_children = [child]
 assert len(it.item_children) == 1 and it.item_children[0].slug == "widget"
 assert it.item_children[0].parent_id == it.id
+# The row's own key setter, in place and all the way down: a child that
+# points nowhere takes this row's id, and its child takes the child's.
+child.id = uuid.UUID("22222222-2222-2222-2222-222222222222")
+child.parent_id = None
+grand = protopy.sample()
+grand.parent_id = None
+child.item_children = [grand]
+it.item_children = [child]
+assert it.set_id_on_children() is None
+assert it.item_children[0].parent_id == it.id, it.item_children
+assert it.item_children[0].item_children[0].parent_id == child.id, it.item_children
 print("  writes  ok")
 
 # A nullable column takes None; the enum compares by identity and by int,
@@ -344,12 +355,6 @@ loaded = items.load_item_children(parent)
 assert [c.slug for c in loaded.item_children] == ["widget-kid"], loaded.item_children
 assert loaded.item_children[0].parent_id == made.id
 assert parent.item_children == [], "the row given is left as it was"
-# The key setter is the same shape: a changed copy comes back.
-kid.parent_id = None
-parent.item_children = [kid]
-keyed = items.set_id_on_children(parent)
-assert keyed.item_children[0].parent_id == made.id, keyed.item_children
-assert parent.item_children[0].parent_id is None, "the row given is left as it was"
 
 # A query dict: keys are columns, an operator after a double underscore,
 # None is IS NULL, a list is ANY; order_by, limit and offset beside it.

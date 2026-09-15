@@ -278,7 +278,94 @@ fn struct_block(
         fields.push_str(&indent(&child_field(child, table, &name, opts), 4));
     }
 
-    format!("{docs}{derives}{pyclass}pub struct {name} {{\n{fields}}}\n")
+    let mut out = format!("{docs}{derives}{pyclass}pub struct {name} {{\n{fields}}}\n");
+    out.push_str(&key_block(table, opts, &children.fields, &name, warnings));
+    out
+}
+
+/// `set_id_on_children`: the row's key, copied into every child row it
+/// holds, and on down through theirs. Every row type has it, so a
+/// caller building a parent and its children in memory can rely on it
+/// before a save; with no children fields it does nothing. A nullable
+/// foreign key on the child takes `Some(key)`; a key that is not `Copy`
+/// is cloned per child. A child whose column cannot be set from this
+/// row's — the referenced column is nullable and the child's is not —
+/// is left alone, with a warning. Under pyo3 the block is also the
+/// class's methods, so Python changes its object in place.
+fn key_block(
+    table: &Table,
+    opts: &Opts,
+    children: &[ChildField],
+    name: &str,
+    warnings: &mut Vec<String>,
+) -> String {
+    let qualified = format!("{}.{}", table.schema, table.name);
+    let mut doc = String::new();
+    let mut body = String::new();
+    for child in children {
+        let (field, c_table, c_column) = (&child.field, &child.child.table, &child.child.column);
+        let ref_column = &child.child.ref_column;
+        let Some(parent) = table.column(ref_column) else {
+            continue;
+        };
+        if !parent.not_null && child.child.not_null {
+            warnings.push(format!(
+                "{qualified}: `set_id_on_children` cannot set `{c_table}.{c_column}`, which \
+                 is NOT NULL, from `{ref_column}`, which is nullable; `{field}` is left as it is"
+            ));
+            continue;
+        }
+        let copy = typemap::map(&parent.ty, opts.generate).copy;
+        let clone = if copy { "" } else { ".clone()" };
+        let value = if child.child.not_null || !parent.not_null {
+            format!("key{clone}")
+        } else {
+            format!("Some(key{clone})")
+        };
+        let ref_field = naming::ident(ref_column);
+        let c_field = naming::ident(c_column);
+        doc.push_str(&format!(
+            "    /// `{c_column}` of every `{field}` row becomes this row's `{ref_column}`.\n"
+        ));
+        body.push_str(&format!(
+            "        let key = self.{ref_field}{clone};\n        \
+             for child in &mut self.{field} {{\n            \
+             child.{c_field} = {value};\n            \
+             child.set_id_on_children();\n        }}\n"
+        ));
+    }
+
+    let pymethods = if opts.pyo3 {
+        format!(
+            "#[cfg_attr(feature = \"{}\", pyo3::pymethods)]\n",
+            opts.generate.pyo3_feature
+        )
+    } else {
+        String::new()
+    };
+    let owned = indent(OWNED, 4);
+    if body.is_empty() {
+        return format!(
+            r#"
+{pymethods}impl {name} {{
+    /// The row's key, copied into every child row it holds. `{qualified}`
+    /// holds no children fields, so there is nothing to set; the method
+    /// is here so every row type has it.
+{owned}    pub fn set_id_on_children(&mut self) {{}}
+}}
+"#
+        );
+    }
+    format!(
+        r#"
+{pymethods}impl {name} {{
+    /// The row's key, copied into every child row it holds, and on down
+    /// through theirs, in memory:
+{doc}{owned}    pub fn set_id_on_children(&mut self) {{
+{body}    }}
+}}
+"#
+    )
 }
 
 /// The field a parent holds its child rows in. Not a column, so sqlx is
@@ -734,6 +821,122 @@ mod tests {
         assert!(
             flat.contains("pub variant_children: Vec<Variant>,"),
             "{flat}"
+        );
+    }
+
+    /// Every row type pushes its key down into the child rows it
+    /// holds, and they push it on down, so a tree built in memory can
+    /// be made consistent before it is saved. `Copy` keys are copied,
+    /// others cloned per child, and a nullable foreign key takes `Some`.
+    #[test]
+    fn every_row_sets_its_key_on_its_children() {
+        let out = render(false).code;
+        assert!(
+            out.contains(
+                "impl Product {\n    \
+                 /// The row's key, copied into every child row it holds, and on down\n    \
+                 /// through theirs, in memory:\n    \
+                 /// `product_id` of every `variant_children` row becomes this row's `id`.\n"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "    pub fn set_id_on_children(&mut self) {\n        \
+                 let key = self.id;\n        \
+                 for child in &mut self.variant_children {\n            \
+                 child.product_id = key;\n            \
+                 child.set_id_on_children();\n        }\n    }\n}\n"
+            ),
+            "{out}"
+        );
+        // Without pyo3 the block is plain; with it, the same block is
+        // the class's methods, behind the feature.
+        assert!(!out.contains("pymethods)]\nimpl Product {"), "{out}");
+        let out = render(true).code;
+        assert!(
+            out.contains("#[cfg_attr(feature = \"python\", pyo3::pymethods)]\nimpl Product {"),
+            "{out}"
+        );
+
+        // A tree's foreign key is nullable: the root has no parent.
+        let generate = Generate::default();
+        let opts = fixture::opts(&generate, Strategy::Embedded);
+        let out = model_file(&fixture::category(), &opts, None).code;
+        assert!(
+            out.contains(
+                "for child in &mut self.category_children {\n            \
+                 child.parent_id = Some(key);"
+            ),
+            "{out}"
+        );
+
+        // A key that is not Copy is cloned once out of the row and once
+        // per child.
+        let mut model = fixture::product();
+        let id = model
+            .table
+            .columns
+            .iter_mut()
+            .find(|c| c.name == "id")
+            .unwrap();
+        id.ty = PgType::Scalar("text".into());
+        id.sql_type = "text".into();
+        let out = model_file(&model, &opts, None).code;
+        assert!(out.contains("let key = self.id.clone();"), "{out}");
+        assert!(out.contains("child.product_id = key.clone();"), "{out}");
+
+        // No children fields: the method is still there, and does nothing.
+        let out = model_file(&fixture::awkward(), &opts, None).code;
+        assert!(
+            out.contains("pub fn set_id_on_children(&mut self) {}"),
+            "{out}"
+        );
+        let generate = Generate {
+            children_field: String::new(),
+            ..Generate::default()
+        };
+        let out = model_file(
+            &fixture::product(),
+            &fixture::opts(&generate, Strategy::Embedded),
+            None,
+        )
+        .code;
+        assert!(
+            out.contains("pub fn set_id_on_children(&mut self) {}"),
+            "{out}"
+        );
+        assert!(syn::parse_file(&out).is_ok(), "{out}");
+    }
+
+    /// A child column that is NOT NULL cannot take a parent column that
+    /// is nullable: the field is left alone, and the run is told.
+    #[test]
+    fn a_key_that_cannot_be_set_is_left_alone_and_said() {
+        let mut model = fixture::product();
+        model
+            .table
+            .columns
+            .iter_mut()
+            .find(|c| c.name == "id")
+            .unwrap()
+            .not_null = false;
+        let generate = Generate::default();
+        let rendered = model_file(&model, &fixture::opts(&generate, Strategy::Embedded), None);
+        assert!(
+            rendered
+                .code
+                .contains("pub fn set_id_on_children(&mut self) {}"),
+            "{}",
+            rendered.code
+        );
+        assert!(
+            rendered
+                .warnings
+                .iter()
+                .any(|w| w.contains("`set_id_on_children`") && w.contains("`variant_children`")),
+            "{:?}",
+            rendered.warnings
         );
     }
 
