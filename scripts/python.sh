@@ -344,6 +344,12 @@ loaded = items.load_item_children(parent)
 assert [c.slug for c in loaded.item_children] == ["widget-kid"], loaded.item_children
 assert loaded.item_children[0].parent_id == made.id
 assert parent.item_children == [], "the row given is left as it was"
+# The key setter is the same shape: a changed copy comes back.
+kid.parent_id = None
+parent.item_children = [kid]
+keyed = items.set_id_on_children(parent)
+assert keyed.item_children[0].parent_id == made.id, keyed.item_children
+assert parent.item_children[0].parent_id is None, "the row given is left as it was"
 
 # A query dict: keys are columns, an operator after a double underscore,
 # None is IS NULL, a list is ANY; order_by, limit and offset beside it.

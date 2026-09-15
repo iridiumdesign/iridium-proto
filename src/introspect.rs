@@ -193,6 +193,9 @@ pub struct Child {
     pub table: String,
     /// Its foreign key column.
     pub column: String,
+    /// Whether that column is `NOT NULL`, which decides whether the
+    /// parent's key is set on it bare or as `Some`.
+    pub not_null: bool,
     /// The column here that it refers to — the primary key, nearly always.
     pub ref_column: String,
     /// The child's own primary key, for naming the finder the parent's
@@ -446,6 +449,7 @@ const CHILDREN_SQL: &str = "\
 SELECT n.nspname::text  AS schema,
        t.relname::text  AS table,
        a.attname::text  AS column,
+       a.attnotnull     AS not_null,
        ra.attname::text AS ref_column
   FROM pg_constraint c
   JOIN pg_class t       ON t.oid = c.conrelid
@@ -580,6 +584,7 @@ pub async fn model(pool: &PgPool, schema: &str, table: &str) -> Result<Model> {
             schema: child_schema,
             table: child_table,
             column: row.get("column"),
+            not_null: row.get("not_null"),
             ref_column: row.get("ref_column"),
             primary_key,
             unique_keys,

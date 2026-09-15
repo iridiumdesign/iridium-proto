@@ -396,6 +396,14 @@ macro_rules! round_trip {
             let with = bins.find_by_id_with_item_children(bin.id).await?.expect("the bin");
             assert_eq!(with.item_children.len(), 1);
             assert!(with.order_children.is_empty(), "the other child table, unloaded");
+            // The parent's key, pushed down in memory: a child row that
+            // points elsewhere is made to point here, and nothing is sent.
+            let mut stray = made.clone();
+            stray.bin_id = uuid::Uuid::nil();
+            let mut with = with;
+            with.item_children = vec![stray];
+            bins.set_id_on_children(&mut with);
+            assert_eq!(with.item_children[0].bin_id, bin.id, "{tag}: the key set on the child");
 
             // A tree: one table, both sides. One level only.
             let categories = CategoryMapper::new(pool);
@@ -405,13 +413,17 @@ macro_rules! round_trip {
             let leaf = categories
                 .create(&NewCategory { name: format!("leaf-{tag}"), parent_id: Some(root.id) })
                 .await?;
-            let tree = categories
+            let mut tree = categories
                 .find_by_id_with_category_children(root.id)
                 .await?
                 .expect("the root");
             assert_eq!(tree.category_children.len(), 1);
             assert_eq!(tree.category_children[0].id, leaf.id);
             assert!(tree.category_children[0].category_children.is_empty(), "one level");
+            // A tree's foreign key is nullable, so the key arrives as Some.
+            tree.category_children[0].parent_id = None;
+            categories.set_id_on_children(&mut tree);
+            assert_eq!(tree.category_children[0].parent_id, Some(root.id), "{tag}: Some(key)");
             categories.delete(leaf.id).await?;
             categories.delete(root.id).await?;
 
@@ -428,7 +440,7 @@ macro_rules! round_trip {
             items.delete(made.id).await?;
             assert!(items.find_by_id(made.id).await?.is_none());
 
-            println!("  {tag}: every column decoded, every method round tripped, children loaded");
+            println!("  {tag}: every column decoded, every method round tripped, children loaded and keyed");
             Ok(())
         }
     };

@@ -12,6 +12,15 @@ Planned for 0.1.2: a Rust-native `Data` operation, with the Python
 class as a thin wrapper over it ([#17]). See the
 [0.1.2 milestone](https://github.com/iridiumdesign/iridium-proto/milestone/1).
 
+### Added
+
+- `set_id_on_children` on every mapper: copies the parent's key into
+  every child row it holds, in memory, so a parent and its children
+  built by hand agree before a save. A nullable foreign key takes
+  `Some`; a key that is not `Copy` is cloned. A mapper with no children
+  fields has it too, doing nothing. The Python class hands back a keyed
+  copy, as its loaders do. ([#21])
+
 ### Changed
 
 - Children fields are named after their child table with
@@ -106,3 +115,4 @@ moves, correcting files rather than overwriting them.
 [#16]: https://github.com/iridiumdesign/iridium-proto/pull/16
 [#17]: https://github.com/iridiumdesign/iridium-proto/issues/17
 [#19]: https://github.com/iridiumdesign/iridium-proto/issues/19
+[#21]: https://github.com/iridiumdesign/iridium-proto/issues/21

@@ -61,6 +61,10 @@ pub fn mapper_file(model: &Model, opts: &Opts) -> Rendered {
             4,
         ));
     }
+    methods.push_str(&indent(
+        &set_id_method(table, opts, &children.fields, &row, &mut warnings),
+        4,
+    ));
     methods.push_str(&indent(&where_methods(table, opts, &row), 4));
 
     let mut code = header(
@@ -135,6 +139,10 @@ fn python_block(
             4,
         ));
     }
+    methods.push_str(&indent(
+        &python_set_id_method(table, opts, row, warnings),
+        4,
+    ));
     methods.push_str(&indent(&python_where_methods(opts, row), 4));
     let converter = python_query_fn(table, opts);
 
@@ -676,6 +684,106 @@ fn child_methods(
     out
 }
 
+/// `set_id_on_children`: the parent's key, copied into every child row
+/// it holds. Every mapper has it, so a caller building a parent and its
+/// children in memory can rely on it before a save; with no children
+/// fields it does nothing. One level, like the loaders. A nullable
+/// foreign key on the child takes `Some(key)`; a key that is not `Copy`
+/// is cloned per child. A child whose column cannot be set from the
+/// parent's — the referenced column is nullable and the child's is
+/// not — is left alone, with a warning.
+fn set_id_method(
+    table: &Table,
+    opts: &Opts,
+    children: &[ChildField],
+    row: &str,
+    warnings: &mut Vec<String>,
+) -> String {
+    let qualified = format!("{}.{}", table.schema, table.name);
+    let mut doc = String::new();
+    let mut body = String::new();
+    for child in children {
+        let (field, c_table, c_column) = (&child.field, &child.child.table, &child.child.column);
+        let ref_column = &child.child.ref_column;
+        let Some(parent) = table.column(ref_column) else {
+            continue;
+        };
+        if !parent.not_null && child.child.not_null {
+            warnings.push(format!(
+                "{qualified}: `set_id_on_children` cannot set `{c_table}.{c_column}`, which \
+                 is NOT NULL, from `{ref_column}`, which is nullable; `{field}` is left as it is"
+            ));
+            continue;
+        }
+        let copy = typemap::map(&parent.ty, opts.generate).copy;
+        let clone = if copy { "" } else { ".clone()" };
+        let value = if child.child.not_null || !parent.not_null {
+            format!("key{clone}")
+        } else {
+            format!("Some(key{clone})")
+        };
+        let ref_field = naming::ident(ref_column);
+        let c_field = naming::ident(c_column);
+        doc.push_str(&format!(
+            "/// `{c_column}` of every `{field}` row becomes this row's `{ref_column}`.\n"
+        ));
+        body.push_str(&format!(
+            "    let key = row.{ref_field}{clone};\n    for child in &mut row.{field} {{\n        child.{c_field} = {value};\n    }}\n"
+        ));
+    }
+
+    if body.is_empty() {
+        return format!(
+            r#"
+/// The parent's key, copied into every child row it holds. `{qualified}`
+/// holds no children fields, so there is nothing to set; the method is
+/// here so every mapper has it.
+{OWNED}pub fn set_id_on_children(&self, _row: &mut {row}) {{}}
+"#
+        );
+    }
+    format!(
+        r#"
+/// The parent's key, copied into every child row it holds, in memory:
+{doc}/// One level: the children's own children are left as they are.
+{OWNED}pub fn set_id_on_children(&self, row: &mut {row}) {{
+{body}}}
+"#
+    )
+}
+
+/// `set_id_on_children` for Python. Python has no `&mut`, so the row
+/// comes back changed rather than the one given being changed, which
+/// needs `Clone` on the row the way the loaders do.
+fn python_set_id_method(
+    table: &Table,
+    opts: &Opts,
+    row: &str,
+    warnings: &mut Vec<String>,
+) -> String {
+    if !opts.generate.derives.iter().any(|d| d == "Clone") {
+        warnings.push(format!(
+            "{}.{}: `set_id_on_children` needs `Clone` in [generate] derives to hand a \
+             row back to Python; the Python class goes without it",
+            table.schema, table.name
+        ));
+        return String::new();
+    }
+    format!(
+        r#"
+/// The row with its key copied into every child row it holds. Hands
+/// back a changed copy rather than changing the row it was given.
+{OWNED}fn set_id_on_children(&self, row: pyo3::PyRef<'_, {row}>) -> {row} {{
+    let db = self.db.get();
+    let mapper = {row}Mapper::new(&db.pool);
+    let mut row = (*row).clone();
+    mapper.set_id_on_children(&mut row);
+    row
+}}
+"#
+    )
+}
+
 /// `find_where` and `count_where`: the one place a mapper's SQL is
 /// assembled at run time, under either strategy, since a `Query` names
 /// columns the caller chooses and no fixed function can take that.
@@ -1121,6 +1229,107 @@ mod tests {
         }
     }
 
+    /// Every mapper pushes the parent's key down into the child rows it
+    /// holds, so a tree built in memory can be made consistent before
+    /// it is saved. `Copy` keys are copied, others cloned per child, and
+    /// a nullable foreign key takes `Some`.
+    #[test]
+    fn every_mapper_sets_its_key_on_its_children() {
+        let out = render(Strategy::Embedded);
+        assert!(
+            out.contains(
+                "    pub fn set_id_on_children(&self, row: &mut Product) {\n        \
+                 let key = row.id;\n        \
+                 for child in &mut row.variant_children {\n            \
+                 child.product_id = key;\n        }\n    }\n"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "/// `product_id` of every `variant_children` row becomes this row's `id`."
+            ),
+            "{out}"
+        );
+
+        // A tree's foreign key is nullable: the root has no parent.
+        let generate = Generate::default();
+        let opts = fixture::opts(&generate, Strategy::Embedded);
+        let out = mapper_file(&fixture::category(), &opts).code;
+        assert!(
+            out.contains(
+                "for child in &mut row.category_children {\n            child.parent_id = Some(key);"
+            ),
+            "{out}"
+        );
+
+        // A key that is not Copy is cloned once out of the row and once
+        // per child.
+        let mut model = fixture::product();
+        let id = model
+            .table
+            .columns
+            .iter_mut()
+            .find(|c| c.name == "id")
+            .unwrap();
+        id.ty = crate::introspect::PgType::Scalar("text".into());
+        id.sql_type = "text".into();
+        let out = mapper_file(&model, &opts).code;
+        assert!(out.contains("let key = row.id.clone();"), "{out}");
+        assert!(out.contains("child.product_id = key.clone();"), "{out}");
+
+        // No children fields: the method is still there, and does nothing.
+        let out = mapper_file(&fixture::awkward(), &opts).code;
+        assert!(
+            out.contains("pub fn set_id_on_children(&self, _row: &mut Order) {}"),
+            "{out}"
+        );
+        let generate = Generate {
+            children_field: String::new(),
+            ..Generate::default()
+        };
+        let out = mapper_file(
+            &fixture::product(),
+            &fixture::opts(&generate, Strategy::Embedded),
+        )
+        .code;
+        assert!(
+            out.contains("pub fn set_id_on_children(&self, _row: &mut Product) {}"),
+            "{out}"
+        );
+    }
+
+    /// A child column that is NOT NULL cannot take a parent column that
+    /// is nullable: the field is left alone, and the run is told.
+    #[test]
+    fn a_key_that_cannot_be_set_is_left_alone_and_said() {
+        let mut model = fixture::product();
+        model
+            .table
+            .columns
+            .iter_mut()
+            .find(|c| c.name == "id")
+            .unwrap()
+            .not_null = false;
+        let generate = Generate::default();
+        let rendered = mapper_file(&model, &fixture::opts(&generate, Strategy::Embedded));
+        assert!(
+            rendered
+                .code
+                .contains("pub fn set_id_on_children(&self, _row: &mut Product) {}"),
+            "{}",
+            rendered.code
+        );
+        assert!(
+            rendered
+                .warnings
+                .iter()
+                .any(|w| w.contains("`set_id_on_children`") && w.contains("`variant_children`")),
+            "{:?}",
+            rendered.warnings
+        );
+    }
+
     fn render_python(strategy: Strategy) -> String {
         let generate = Generate::default();
         let mut opts = fixture::opts(&generate, strategy);
@@ -1296,6 +1505,18 @@ mod tests {
             "{python}"
         );
 
+        // The key setter crosses the same way, as a changed copy.
+        assert!(
+            python.contains(
+                "    fn set_id_on_children(&self, row: pyo3::PyRef<'_, Product>) -> Product {"
+            ),
+            "{python}"
+        );
+        assert!(
+            python.contains("mapper.set_id_on_children(&mut row);"),
+            "{python}"
+        );
+
         // Without `Clone` there is no copy to hand back: the finder stays,
         // the loader goes, and the run says why.
         let mut generate = Generate::default();
@@ -1305,6 +1526,7 @@ mod tests {
         let rendered = mapper_file(&fixture::product(), &opts);
         let python = &rendered.code[rendered.code.find("── Python").unwrap()..];
         assert!(!python.contains("fn load_variant_children("), "{python}");
+        assert!(!python.contains("fn set_id_on_children("), "{python}");
         assert!(
             python.contains("fn find_by_id_with_variant_children("),
             "{python}"
