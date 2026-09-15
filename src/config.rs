@@ -100,9 +100,9 @@ pub struct Generate {
     /// Add the dependencies the output needs to the nearest `Cargo.toml`
     /// above where it is written. `--no-manifest` beats it for a run.
     pub manifest: bool,
-    /// The field a parent struct holds its child rows in, when exactly
-    /// one table refers to it. With several, each field is named after
-    /// its child table. Empty means no children fields at all.
+    /// The suffix of the field a parent struct holds its child rows in:
+    /// `variant_children` for rows of `variant`, named after the child
+    /// table. Empty means no children fields at all.
     pub children_field: String,
     /// Per-parent overrides, keyed `schema.table` or `table`.
     pub relations: HashMap<String, Relation>,

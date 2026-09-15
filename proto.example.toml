@@ -43,9 +43,9 @@ exclude_schemas = ["information_schema", "pg_catalog", "pg_toast"]
 # this for a run.
 # manifest = true
 
-# The field a parent struct holds its child rows in, when exactly one
-# table refers to it. With several, each field is named after its child
-# table. "" generates no children fields at all.
+# The suffix of the field a parent struct holds its child rows in,
+# named after the child table: variant_children for rows of variant.
+# "" generates no children fields at all.
 children_field = "children"
 
 # Per-parent overrides, keyed schema.table or table: one name for a

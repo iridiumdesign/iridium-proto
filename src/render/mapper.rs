@@ -1001,7 +1001,8 @@ mod tests {
         assert!(!out.contains("variant::Variant"), "{out}");
         assert!(
             out.contains(
-                "pub async fn load_children(&self, row: &mut Product) -> Result<(), sqlx::Error>"
+                "pub async fn load_variant_children(&self, row: &mut Product) -> \
+                 Result<(), sqlx::Error>"
             ),
             "{out}"
         );
@@ -1013,7 +1014,7 @@ mod tests {
         assert!(out.contains(".bind(row.id)"), "{out}");
         assert!(
             out.contains(
-                "pub async fn find_by_id_with_children(&self, id: Uuid) -> \
+                "pub async fn find_by_id_with_variant_children(&self, id: Uuid) -> \
                  Result<Option<Product>, sqlx::Error>"
             ),
             "{out}"
@@ -1034,14 +1035,15 @@ mod tests {
         assert!(!out.contains("which the migration for"), "{out}");
     }
 
-    /// A column named `id_with_children` would plan a finder called
-    /// `find_by_id_with_children`. The loader still comes; the wrapper
-    /// that would collide with it does not, and the run is told.
+    /// A column named `id_with_variant_children` would plan a finder
+    /// called `find_by_id_with_variant_children`. The loader still
+    /// comes; the wrapper that would collide with it does not, and the
+    /// run is told.
     #[test]
     fn a_wrapper_that_would_shadow_a_finder_is_skipped_and_said() {
         let mut model = fixture::product();
         model.table.columns.push(fixture::column(
-            "id_with_children",
+            "id_with_variant_children",
             crate::introspect::PgType::Scalar("text".into()),
             "text",
             true,
@@ -1049,17 +1051,18 @@ mod tests {
         model
             .table
             .unique_keys
-            .push(vec!["id_with_children".into()]);
+            .push(vec!["id_with_variant_children".into()]);
         let generate = Generate::default();
         let rendered = mapper_file(&model, &fixture::opts(&generate, Strategy::Embedded));
         let out = rendered.code;
-        assert!(out.contains("pub async fn load_children"), "{out}");
+        assert!(out.contains("pub async fn load_variant_children"), "{out}");
         assert_eq!(
-            out.matches("pub async fn find_by_id_with_children").count(),
+            out.matches("pub async fn find_by_id_with_variant_children")
+                .count(),
             1
         );
         assert!(
-            out.contains("find_by_id_with_children(&self, id_with_children: &str)"),
+            out.contains("find_by_id_with_variant_children(&self, id_with_variant_children: &str)"),
             "{out}"
         );
         assert_eq!(rendered.warnings.len(), 1, "{:?}", rendered.warnings);
@@ -1273,21 +1276,23 @@ mod tests {
         let python = &out[out.find("── Python").unwrap()..];
         assert!(
             python.contains(
-                "    fn load_children(\n        &self,\n        py: pyo3::Python<'_>,\n        \
+                "    fn load_variant_children(\n        &self,\n        py: pyo3::Python<'_>,\n        \
                  row: pyo3::PyRef<'_, Product>,\n    ) -> pyo3::PyResult<Product> {"
             ),
             "{python}"
         );
         assert!(
-            python.contains("mapper.load_children(&mut row).await?;"),
+            python.contains("mapper.load_variant_children(&mut row).await?;"),
             "{python}"
         );
         assert!(
-            python.contains("    fn find_by_id_with_children(\n"),
+            python.contains("    fn find_by_id_with_variant_children(\n"),
             "{python}"
         );
         assert!(
-            python.contains("super::python::run(db, py, mapper.find_by_id_with_children(id))"),
+            python.contains(
+                "super::python::run(db, py, mapper.find_by_id_with_variant_children(id))"
+            ),
             "{python}"
         );
 
@@ -1299,8 +1304,11 @@ mod tests {
         opts.pyo3 = true;
         let rendered = mapper_file(&fixture::product(), &opts);
         let python = &rendered.code[rendered.code.find("── Python").unwrap()..];
-        assert!(!python.contains("fn load_children("), "{python}");
-        assert!(python.contains("fn find_by_id_with_children("), "{python}");
+        assert!(!python.contains("fn load_variant_children("), "{python}");
+        assert!(
+            python.contains("fn find_by_id_with_variant_children("),
+            "{python}"
+        );
         assert!(
             rendered.warnings.iter().any(|w| w.contains("`Clone`")),
             "{:?}",
@@ -1315,8 +1323,8 @@ mod tests {
         let mut opts = fixture::opts(&generate, Strategy::Embedded);
         opts.pyo3 = true;
         let out = mapper_file(&fixture::product(), &opts).code;
-        assert!(!out.contains("load_children"), "{out}");
-        assert!(!out.contains("with_children"), "{out}");
+        assert!(!out.contains("load_variant_children"), "{out}");
+        assert!(!out.contains("with_variant_children"), "{out}");
     }
 
     #[test]
@@ -1339,15 +1347,16 @@ mod tests {
             crate::reconcile::reconcile(&out, &out).as_deref(),
             Some(out.as_str())
         );
-        // Both impls carry a `load_children` now — the Rust loader and
-        // its Python wrapper — so a reconcile that keyed methods by name
-        // alone would take one for the other. Both are still here.
-        assert!(out.contains("pub async fn load_children"), "{out}");
+        // Both impls carry a `load_variant_children` now — the Rust
+        // loader and its Python wrapper — so a reconcile that keyed
+        // methods by name alone would take one for the other. Both are
+        // still here.
+        assert!(out.contains("pub async fn load_variant_children"), "{out}");
         assert!(
-            out.contains("fn load_children(\n        &self,\n        py"),
+            out.contains("fn load_variant_children(\n        &self,\n        py"),
             "{out}"
         );
-        assert_eq!(out.matches("fn load_children(").count(), 2, "{out}");
+        assert_eq!(out.matches("fn load_variant_children(").count(), 2, "{out}");
     }
 
     #[test]

@@ -54,13 +54,15 @@ pub struct Children<'a> {
 
 /// The children fields a table gets, in catalog order.
 ///
-/// A table with exactly one child table holds it in `children_field`.
-/// With several, each is named after its child table, or after the
-/// table and column when the same child refers to this table twice.
-/// `[generate.relations]` overrides either. An empty `children_field`
-/// means no fields at all. Children in another schema, and children
-/// excluded by `exclude_tables`, are left out: their type would not be
-/// there to name.
+/// Each field is named after its child table with `children_field` as
+/// the suffix: `variant_children`. When the same child refers to this
+/// table twice the column follows, `link_children_by_from_id`. The name
+/// never depends on how many child tables there are, so a second one
+/// arriving later cannot rename the first. `[generate.relations]`
+/// overrides either. An empty `children_field` means no fields at all.
+/// Children in another schema, and children excluded by
+/// `exclude_tables`, are left out: their type would not be there to
+/// name.
 ///
 /// A field that would collide — with a column, with another child, or
 /// whose type shares a name with one a column imports — is skipped with
@@ -113,12 +115,11 @@ pub fn of<'a>(table: &'a Table, generate: &Generate) -> Children<'a> {
 
     for child in &children {
         let name = override_for(overrides, child, children.len()).unwrap_or_else(|| {
-            if children.len() == 1 {
-                generate.children_field.clone()
-            } else if seen[child.table.as_str()] > 1 {
-                format!("{}_by_{}", child.table, child.column)
+            let suffix = &generate.children_field;
+            if seen[child.table.as_str()] > 1 {
+                format!("{}_{suffix}_by_{}", child.table, child.column)
             } else {
-                child.table.clone()
+                format!("{}_{suffix}", child.table)
             }
         });
         let field = naming::ident(&name);
@@ -213,12 +214,12 @@ mod tests {
     }
 
     #[test]
-    fn one_child_table_takes_the_configured_name() {
+    fn a_child_table_names_the_field_with_the_configured_suffix() {
         let generate = Generate::default();
         let model = fixture::product();
         let children = of(&model.table, &generate);
         assert!(children.warnings.is_empty(), "{:?}", children.warnings);
-        assert_eq!(names(&children), ["children"]);
+        assert_eq!(names(&children), ["variant_children"]);
         assert_eq!(children.fields[0].ty, "Variant");
         assert_eq!(children.fields[0].module, "variant");
         assert_eq!(children.fields[0].call, "by_product_id");
@@ -227,11 +228,11 @@ mod tests {
             children_field: "kids".into(),
             ..Generate::default()
         };
-        assert_eq!(names(&of(&model.table, &generate)), ["kids"]);
+        assert_eq!(names(&of(&model.table, &generate)), ["variant_kids"]);
     }
 
     #[test]
-    fn several_child_tables_are_named_after_themselves() {
+    fn several_child_tables_are_named_the_same_way() {
         let mut model = fixture::product();
         model.table.children = vec![
             child("variant", "product_id"),
@@ -239,10 +240,12 @@ mod tests {
             child("type", "product_id"),
         ];
         let children = of(&model.table, &Generate::default());
-        // A Rust keyword is a raw identifier as a field, and bare in a
-        // method name, where `load_r#type` would not parse.
-        assert_eq!(names(&children), ["variant", "review", "r#type"]);
-        assert_eq!(children.fields[2].stem, "type");
+        // The count does not change the rule: a second child table
+        // arriving later cannot rename the first.
+        assert_eq!(
+            names(&children),
+            ["variant_children", "review_children", "type_children"]
+        );
     }
 
     #[test]
@@ -256,7 +259,11 @@ mod tests {
         let children = of(&model.table, &Generate::default());
         assert_eq!(
             names(&children),
-            ["link_by_from_id", "link_by_to_id", "review"]
+            [
+                "link_children_by_from_id",
+                "link_children_by_to_id",
+                "review_children"
+            ]
         );
     }
 
@@ -268,7 +275,7 @@ mod tests {
             child("variant", "product_id"),
         ];
         let children = of(&model.table, &Generate::default());
-        assert_eq!(names(&children), ["children"]);
+        assert_eq!(names(&children), ["variant_children"]);
         assert!(children.warnings.is_empty(), "{:?}", children.warnings);
     }
 
@@ -301,7 +308,24 @@ mod tests {
                 )),
             },
         );
-        assert_eq!(names(&of(&model.table, &generate)), ["variants", "review"]);
+        assert_eq!(
+            names(&of(&model.table, &generate)),
+            ["variants", "review_children"]
+        );
+
+        // A Rust keyword is a raw identifier as a field, and bare in a
+        // method name, where `load_r#type` would not parse.
+        let mut generate = Generate::default();
+        generate.relations.insert(
+            "product".into(),
+            Relation {
+                children: Some(ChildrenName::One("type".into())),
+            },
+        );
+        let model = fixture::product();
+        let children = of(&model.table, &generate);
+        assert_eq!(names(&children), ["r#type"]);
+        assert_eq!(children.fields[0].stem, "type");
     }
 
     #[test]
@@ -341,14 +365,14 @@ mod tests {
         assert_eq!(children.fields[0].ty, "Category");
     }
 
-    /// A parent with a real `children` column cannot also hold its
-    /// children in one. The column is the database's; the field gives
-    /// way, and the warning says how to rename it.
+    /// A parent with a real `variant_children` column cannot also hold
+    /// its children in one. The column is the database's; the field
+    /// gives way, and the warning says how to rename it.
     #[test]
     fn a_field_that_collides_with_a_column_is_skipped_and_said() {
         let mut model = fixture::product();
         model.table.columns.push(fixture::column(
-            "children",
+            "variant_children",
             PgType::Scalar("int4".into()),
             "integer",
             true,
@@ -357,7 +381,7 @@ mod tests {
         assert!(children.fields.is_empty());
         assert_eq!(children.warnings.len(), 1);
         assert!(
-            children.warnings[0].contains("`children`")
+            children.warnings[0].contains("`variant_children`")
                 && children.warnings[0].contains("[generate.relations]"),
             "{}",
             children.warnings[0]
@@ -371,7 +395,7 @@ mod tests {
             child("Variant", "product_id"),
         ];
         let children = of(&model.table, &Generate::default());
-        assert_eq!(names(&children), ["variant"]);
+        assert_eq!(names(&children), ["variant_children"]);
         assert_eq!(children.warnings.len(), 1);
     }
 

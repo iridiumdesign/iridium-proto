@@ -175,7 +175,7 @@ fn sample() -> Item {
         count: 7,
         created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
         parent_id: None,
-        children: Vec::new(),
+        item_children: Vec::new(),
         size: Some(Dimensions {
             width: Some(Decimal::from_str("2.5").unwrap()),
             unit: Some("cm".to_string()),
@@ -245,7 +245,7 @@ assert isinstance(it.created_at, datetime.datetime), type(it.created_at)
 assert it.created_at.tzinfo is not None, "timestamptz must stay aware"
 # The parent's side of the tree crosses as a list of the same class.
 assert it.parent_id is None
-assert it.children == [], it.children
+assert it.item_children == [], it.item_children
 # A composite crosses as an object of its own class, fields and all.
 assert isinstance(it.size, protopy.Dimensions), type(it.size)
 assert it.size.width == decimal.Decimal("2.5")
@@ -267,9 +267,9 @@ assert it.status == protopy.ItemStatus.Retired
 assert it.id == uuid.UUID("11111111-1111-1111-1111-111111111111")
 child = protopy.sample()
 child.parent_id = it.id
-it.children = [child]
-assert len(it.children) == 1 and it.children[0].slug == "widget"
-assert it.children[0].parent_id == it.id
+it.item_children = [child]
+assert len(it.item_children) == 1 and it.item_children[0].slug == "widget"
+assert it.item_children[0].parent_id == it.id
 print("  writes  ok")
 
 # A nullable column takes None; the enum compares by identity and by int,
@@ -339,11 +339,11 @@ print("  update  ok")
 # the finder does both at once.
 kid = items.create(protopy.NewItem("widget-kid", parent_id=made.id))
 parent = items.find_by_id(made.id)
-assert parent.children == [], "not loaded until asked"
-loaded = items.load_children(parent)
-assert [c.slug for c in loaded.children] == ["widget-kid"], loaded.children
-assert loaded.children[0].parent_id == made.id
-assert parent.children == [], "the row given is left as it was"
+assert parent.item_children == [], "not loaded until asked"
+loaded = items.load_item_children(parent)
+assert [c.slug for c in loaded.item_children] == ["widget-kid"], loaded.item_children
+assert loaded.item_children[0].parent_id == made.id
+assert parent.item_children == [], "the row given is left as it was"
 
 # A query dict: keys are columns, an operator after a double underscore,
 # None is IS NULL, a list is ANY; order_by, limit and offset beside it.
@@ -385,9 +385,9 @@ for bad in ({"id__in": made.id}, {"price__lt": None}, {"id__lt": [made.id]}):
     else:
         raise AssertionError(f"{bad} was not refused before the database saw it")
 print("  queries from a dict")
-both = items.find_by_id_with_children(made.id)
-assert both is not None and len(both.children) == 1, both
-assert items.find_by_id_with_children(uuid.uuid4()) is None
+both = items.find_by_id_with_item_children(made.id)
+assert both is not None and len(both.item_children) == 1, both
+assert items.find_by_id_with_item_children(uuid.uuid4()) is None
 items.delete(kid.id)
 print("  children loaded through the mapper")
 

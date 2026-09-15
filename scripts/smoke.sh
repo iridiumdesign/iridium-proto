@@ -389,13 +389,13 @@ macro_rules! round_trip {
             // tables, so each field is named after its table.
             let bins = BinMapper::new(pool);
             let mut held = bins.find_by_id(bin.id).await?.expect("the bin");
-            assert!(held.item.is_empty(), "nothing loaded until asked");
-            bins.load_item(&mut held).await?;
-            assert_eq!(held.item.len(), 1, "the one item left in it");
-            assert_eq!(held.item[0].id, made.id);
-            let with = bins.find_by_id_with_item(bin.id).await?.expect("the bin");
-            assert_eq!(with.item.len(), 1);
-            assert!(with.order.is_empty(), "the other child table, unloaded");
+            assert!(held.item_children.is_empty(), "nothing loaded until asked");
+            bins.load_item_children(&mut held).await?;
+            assert_eq!(held.item_children.len(), 1, "the one item left in it");
+            assert_eq!(held.item_children[0].id, made.id);
+            let with = bins.find_by_id_with_item_children(bin.id).await?.expect("the bin");
+            assert_eq!(with.item_children.len(), 1);
+            assert!(with.order_children.is_empty(), "the other child table, unloaded");
 
             // A tree: one table, both sides. One level only.
             let categories = CategoryMapper::new(pool);
@@ -406,12 +406,12 @@ macro_rules! round_trip {
                 .create(&NewCategory { name: format!("leaf-{tag}"), parent_id: Some(root.id) })
                 .await?;
             let tree = categories
-                .find_by_id_with_children(root.id)
+                .find_by_id_with_category_children(root.id)
                 .await?
                 .expect("the root");
-            assert_eq!(tree.children.len(), 1);
-            assert_eq!(tree.children[0].id, leaf.id);
-            assert!(tree.children[0].children.is_empty(), "one level");
+            assert_eq!(tree.category_children.len(), 1);
+            assert_eq!(tree.category_children[0].id, leaf.id);
+            assert!(tree.category_children[0].category_children.is_empty(), "one level");
             categories.delete(leaf.id).await?;
             categories.delete(root.id).await?;
 
@@ -704,30 +704,31 @@ psql -q -v ON_ERROR_STOP=1 -c "DROP TABLE $SCHEMA.\"order\" CASCADE;"
 }
 echo "  pruned the model, kept the hand-written file"
 
-say "a parent down to one child table: the field is renamed, cleanly"
-# bin held `item` and `order`; with order gone it holds `children`. The
-# old fields, the methods that filled them and the import order needed
-# have to go with it, or the crate stops compiling.
+say "a parent down to one child table: the survivor keeps its name"
+# bin held `item_children` and `order_children`; with order gone it
+# holds `item_children` still — the name never depended on the count.
+# The old field, the methods that filled it and the import order needed
+# have to go, or the crate stops compiling.
 "$PROTO" --db "$TARGET" --sql server --migrations-dir "$WORK/migrations" \
     schema "$SCHEMA" --pyo3 --mappers --prune \
     --out-dir "$WORK/src/model" --mapper-dir "$WORK/src/mapper_server" \
     >/dev/null 2>&1
-grep -q "pub children: Vec<Item>," "$WORK/src/model/bin.rs" || {
-    echo "  the surviving child did not take the default name" >&2
+grep -q "pub item_children: Vec<Item>," "$WORK/src/model/bin.rs" || {
+    echo "  the surviving child did not keep its name" >&2
     exit 1
 }
-for gone in "pub item:" "pub order:" "order::Order"; do
+for gone in "pub order_children:" "order::Order"; do
     if grep -q "$gone" "$WORK/src/model/bin.rs"; then
         echo "  still in the model after the rename: $gone" >&2
         exit 1
     fi
 done
 for dir in mapper mapper_server; do
-    grep -q "pub async fn load_children" "$WORK/src/$dir/bin.rs" || {
-        echo "  $dir: the loader for the renamed field did not arrive" >&2
+    grep -q "pub async fn load_item_children" "$WORK/src/$dir/bin.rs" || {
+        echo "  $dir: the loader for the surviving field is gone" >&2
         exit 1
     }
-    for gone in "load_item" "load_order" "with_item" "with_order"; do
+    for gone in "load_order" "with_order"; do
         if grep -q "$gone" "$WORK/src/$dir/bin.rs"; then
             echo "  $dir: a stale method survived the rename: $gone" >&2
             exit 1
@@ -738,7 +739,7 @@ done
     echo "  the tree does not compile after the rename" >&2
     exit 1
 }
-echo "  renamed the field, took back the old loaders, and it compiles"
+echo "  kept the field, took back the old loaders, and it compiles"
 
 say "regenerating: the migrations should be left alone"
 "$PROTO" --db "$TARGET" --sql server --migrations-dir "$WORK/migrations" \

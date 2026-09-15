@@ -946,9 +946,9 @@ fn show_config(path: &Path, file: Option<&Config>) -> Result<()> {
             println!(
                 "  children field: {}",
                 if g.children_field.is_empty() {
-                    "(off)"
+                    "(off)".to_string()
                 } else {
-                    &g.children_field
+                    format!("<child>_{}", g.children_field)
                 }
             );
             if !g.types.is_empty() {
