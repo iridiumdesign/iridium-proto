@@ -714,12 +714,12 @@ mod tests {
         assert!(out.contains("use super::variant::Variant;"), "{out}");
         assert!(
             out.contains(
-                "    #[sqlx(skip)]\n    #[serde(default)]\n    pub children: Vec<Variant>,\n"
+                "    #[sqlx(skip)]\n    #[serde(default)]\n    pub variant_children: Vec<Variant>,\n"
             ),
             "{out}"
         );
         assert!(
-            out.contains("`ProductMapper::load_children` fills it"),
+            out.contains("`ProductMapper::load_variant_children` fills it"),
             "{out}"
         );
         // Not a column, so the insert input does not carry it.
@@ -731,7 +731,10 @@ mod tests {
         let opts = fixture::opts(&generate, Strategy::Embedded);
         let flat = schema_file(&[fixture::product()], "shop", &opts).code;
         assert!(!flat.contains("use super::variant"), "{flat}");
-        assert!(flat.contains("pub children: Vec<Variant>,"), "{flat}");
+        assert!(
+            flat.contains("pub variant_children: Vec<Variant>,"),
+            "{flat}"
+        );
     }
 
     #[test]
@@ -739,7 +742,10 @@ mod tests {
         let generate = Generate::default();
         let opts = fixture::opts(&generate, Strategy::Embedded);
         let out = model_file(&fixture::category(), &opts, None).code;
-        assert!(out.contains("pub children: Vec<Category>,"), "{out}");
+        assert!(
+            out.contains("pub category_children: Vec<Category>,"),
+            "{out}"
+        );
         assert!(!out.contains("use super::category"), "{out}");
         assert!(syn::parse_file(&out).is_ok(), "{out}");
     }

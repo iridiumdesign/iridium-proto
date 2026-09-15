@@ -12,6 +12,18 @@ Planned for 0.1.2: a Rust-native `Data` operation, with the Python
 class as a thin wrapper over it ([#17]). See the
 [0.1.2 milestone](https://github.com/iridiumdesign/iridium-proto/milestone/1).
 
+### Changed
+
+- Children fields are named after their child table with
+  `children_field` as the suffix: `variant_children`, and
+  `link_children_by_from_id` when the same child refers to the parent
+  twice. The loaders follow, `load_variant_children` and
+  `find_by_id_with_variant_children`. The name no longer depends on how
+  many child tables the parent has, so a second one arriving later
+  cannot rename the first. A parent with one child table, which 0.1.1
+  called `children`, is renamed on the next run; `[generate.relations]`
+  pins the old name where that matters. ([#19])
+
 ## [0.1.1] — 2026-09-13
 
 The layer above the mappers, and the Python side of all of it.
@@ -93,3 +105,4 @@ moves, correcting files rather than overwriting them.
 [#15]: https://github.com/iridiumdesign/iridium-proto/pull/15
 [#16]: https://github.com/iridiumdesign/iridium-proto/pull/16
 [#17]: https://github.com/iridiumdesign/iridium-proto/issues/17
+[#19]: https://github.com/iridiumdesign/iridium-proto/issues/19

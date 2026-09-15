@@ -481,31 +481,32 @@ fill it.
 
 ```rust
 /// Rows of `shop.variant` whose `product_id` is this row's `id`. Not a
-/// column: `ProductMapper::load_children` fills it, and it is empty
-/// until then.
+/// column: `ProductMapper::load_variant_children` fills it, and it is
+/// empty until then.
 #[sqlx(skip)]
 #[serde(default)]
-pub children: Vec<Variant>,
+pub variant_children: Vec<Variant>,
 ```
 
 ```rust
 let products = ProductMapper::new(&pool);
 let mut one = products.find_by_id(id).await?.unwrap();
-products.load_children(&mut one).await?;            // fills one.children
-let same = products.find_by_id_with_children(id).await?;
+products.load_variant_children(&mut one).await?;    // fills one.variant_children
+let same = products.find_by_id_with_variant_children(id).await?;
 ```
 
 One level: the children's own children are not loaded. A table that
 refers to itself — `category.parent_id` to `category.id` — is the
-common tree, and holds `children: Vec<Category>` like any other parent.
+common tree, and holds `category_children: Vec<Category>` like any
+other parent.
 
-The field is `children` when exactly one table refers to the parent,
-which is what most schemas look like; `children_field` in the config
-renames it. A parent with several child tables names each field after
-its child table (`variant`, `review`), or after the table and column
-when the same child refers to it twice (`link_by_from_id`). Both can be
-overridden per parent, which also pins a name so a second child table
-arriving later cannot rename the first:
+Every field is named after its child table with `children_field` as the
+suffix — `variant_children`, `review_children` — or after the table and
+column when the same child refers to the parent twice
+(`link_children_by_from_id`). The count of child tables plays no part,
+so a second one arriving later cannot rename the first. The loaders
+follow the field: `load_variant_children`,
+`find_by_id_with_variant_children`. Both can be overridden per parent:
 
 ```toml
 [generate]
@@ -527,7 +528,7 @@ generated: a schema or database run writes both, and a parent generated
 on its own with `proto mapper` expects the child's to exist. A
 one-to-one link, where the referring column is itself unique, is not a
 collection and gets no field. A field that would collide — with a
-column called `children`, say, or a child table named `date_time` whose
+column called `variant_children`, say, or a child table named `date_time` whose
 `DateTime` shadows `chrono`'s — is skipped with a warning that says how
 to rename it. When a field goes away or is renamed, the methods that
 filled it and the import it needed go with it; regenerating leaves no
@@ -1064,8 +1065,8 @@ one = products.find_by_id(made.id)
 one.name = "Dovetail saw, 10in"
 products.update(one)
 
-one = products.load_children(one)               # a filled copy
-one = products.find_by_id_with_children(made.id)
+one = products.load_variant_children(one)       # a filled copy
+one = products.find_by_id_with_variant_children(made.id)
 products.delete(one.id)
 ```
 
@@ -1090,9 +1091,9 @@ composite, a type from `[generate.types]` — cannot be queried from
 Python and says so by name.
 
 The [children](#children) loaders come too. Python has no `&mut`, so
-`load_children` hands back the row with the field filled rather than
-changing the one it was given; the `_with_children` finder is the same
-as the Rust one. A row that arrives any other way has an empty list
+`load_variant_children` hands back the row with the field filled rather
+than changing the one it was given; the `_with_variant_children` finder
+is the same as the Rust one. A row that arrives any other way has an empty list
 until one of them runs. Handing back a copy needs `Clone` among the
 row derives, which the default has; without it the class gets the
 finder and no loader, and the run says so.
