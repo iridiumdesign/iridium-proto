@@ -500,6 +500,20 @@ refers to itself — `category.parent_id` to `category.id` — is the
 common tree, and holds `category_children: Vec<Category>` like any
 other parent.
 
+The other direction is in memory only, and it is the row's own. Every
+row type has `set_id_on_children`, which copies its key into every
+child row it holds — each `variant_children` row's `product_id` becomes
+this row's `id` — and then asks each child to do the same, all the way
+down. A parent and its children built by hand agree before anything is
+saved, however deep the tree. A nullable foreign key, the tree's
+`parent_id`, takes `Some(id)`. A table with no children fields still
+has the method, doing nothing, so a caller can rely on it.
+
+```rust
+one.variant_children.push(Variant { product_id: Uuid::nil(), ..variant });
+one.set_id_on_children();                         // product_id is one.id now
+```
+
 Every field is named after its child table with `children_field` as the
 suffix — `variant_children`, `review_children` — or after the table and
 column when the same child refers to the parent twice
@@ -1067,6 +1081,7 @@ products.update(one)
 
 one = products.load_variant_children(one)       # a filled copy
 one = products.find_by_id_with_variant_children(made.id)
+one.set_id_on_children()                        # the row's own, in place
 products.delete(one.id)
 ```
 
@@ -1093,7 +1108,8 @@ Python and says so by name.
 The [children](#children) loaders come too. Python has no `&mut`, so
 `load_variant_children` hands back the row with the field filled rather
 than changing the one it was given; the `_with_variant_children` finder
-is the same as the Rust one. A row that arrives any other way has an empty list
+is the same as the Rust one. `set_id_on_children` is the row's own
+method and changes the object in place, as it does in Rust. A row that arrives any other way has an empty list
 until one of them runs. Handing back a copy needs `Clone` among the
 row derives, which the default has; without it the class gets the
 finder and no loader, and the run says so.

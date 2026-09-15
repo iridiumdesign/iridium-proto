@@ -203,6 +203,7 @@ mod tests {
             schema: "shop".into(),
             table: table.into(),
             column: column.into(),
+            not_null: true,
             ref_column: "id".into(),
             primary_key: vec!["id".into()],
             unique_keys: Vec::new(),
