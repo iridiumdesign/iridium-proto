@@ -256,7 +256,18 @@ pub fn query_from_python(
 /// `[generate.types]`, one proto does not know, or one with no
 /// conversion on the Python side.
 fn python_bindable(column: &Column, module: &str, opts: &Opts) -> Option<String> {
-    let generate = opts.generate;
+    python_type(column, module, &opts.model_path, opts.generate)
+}
+
+/// The full Rust path a column's value is read as from Python, or
+/// `None` when it cannot be — as [`python_bindable`], for a caller
+/// whose models are filed under `model_path`.
+pub(crate) fn python_type(
+    column: &Column,
+    module: &str,
+    model_path: &str,
+    generate: &crate::config::Generate,
+) -> Option<String> {
     let mapped = typemap::map(&column.ty, generate);
     let pg_name = match &column.ty {
         PgType::Array(_) | PgType::Composite { .. } => return None,
@@ -271,8 +282,7 @@ fn python_bindable(column: &Column, module: &str, opts: &Opts) -> Option<String>
     if let PgType::Enum { name, .. } = &column.ty {
         // Re-exported from the model's own module, wherever it is filed.
         return Some(format!(
-            "{}::{module}::{}",
-            opts.model_path,
+            "{model_path}::{module}::{}",
             naming::pascal_case(name)
         ));
     }

@@ -468,6 +468,92 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     embedded(&pool).await?;
     server(&pool).await?;
+
+    // The Rust Data: one request in, routed by table name, the table's
+    // own types out, and no interpreter in the path.
+    {
+        use proto_smoke::mapper::query::Query;
+        use proto_smoke::model::item::ItemPatch;
+        use proto_smoke::operation::data::{Data, Error, Op, Outcome, Request, Row, Rows, Values};
+        let data = Data::new(&pool);
+        let bins = proto_smoke::mapper::bin::BinMapper::new(&pool);
+        let bin = bins.create(&NewBin { code: "bin-data".to_string() }).await?;
+        let made = match data
+            .execute(Request {
+                table: "item",
+                op: Op::Create,
+                query: Query::new(),
+                values: Some(Values::ProtoSmokeItemInput(NewItem {
+                    slug: "slug-data".to_string(),
+                    name: "Routed".to_string(),
+                    status: None,
+                    price: Some(Decimal::from_str("4.50")?),
+                    tags: None,
+                    bin_id: bin.id,
+                    width: None,
+                    size: None,
+                    sizes: None,
+                })),
+            })
+            .await?
+        {
+            Outcome::Row(Row::ProtoSmokeItem(row)) => row,
+            other => panic!("create gave {other:?}"),
+        };
+        let query = || Query::new().eq("id", made.id);
+        let Outcome::Rows(Rows::ProtoSmokeItem(rows)) = data
+            .execute(Request { table: "proto_smoke.item", op: Op::Find, query: query(), values: None })
+            .await?
+        else {
+            panic!("find gave rows of another table");
+        };
+        assert_eq!(rows.len(), 1, "found by the query");
+        let Outcome::Count(n) = data
+            .execute(Request { table: "item", op: Op::Count, query: query(), values: None })
+            .await?
+        else {
+            panic!("count gave no count");
+        };
+        assert_eq!(n, 1);
+        // The patch: a column set, a nullable one set null, the rest left.
+        let patch = ItemPatch {
+            name: Some("Patched".to_string()),
+            price: Some(None),
+            ..Default::default()
+        };
+        let Outcome::Rows(Rows::ProtoSmokeItem(updated)) = data
+            .execute(Request {
+                table: "item",
+                op: Op::Update,
+                query: query(),
+                values: Some(Values::ProtoSmokeItemPatch(patch)),
+            })
+            .await?
+        else {
+            panic!("update gave rows of another table");
+        };
+        assert_eq!(updated[0].name, "Patched");
+        assert_eq!(updated[0].price, None);
+        assert_eq!(updated[0].slug, "slug-data", "left as it was");
+        // The errors are the operation's own.
+        assert!(matches!(
+            data.execute(Request { table: "item", op: Op::Update, query: query(), values: None }).await,
+            Err(Error::Values { .. })
+        ));
+        assert!(matches!(
+            data.execute(Request { table: "nowhere", op: Op::Find, query: Query::new(), values: None }).await,
+            Err(Error::NoSuchTable(_))
+        ));
+        let Outcome::Deleted(n) = data
+            .execute(Request { table: "item", op: Op::Delete, query: query(), values: None })
+            .await?
+        else {
+            panic!("delete gave no count");
+        };
+        assert_eq!(n, 1);
+        bins.delete(bin.id).await?;
+        println!("  data: one request in, routed by table, the table's own types out");
+    }
     Ok(())
 }
 RUST
@@ -717,12 +803,20 @@ echo "  said nothing about reformatting, which is nothing"
 say "dropping a table: --prune should take back what proto put there"
 printf 'pub fn helper() {}\n' > "$WORK/src/model/handwritten.rs"
 psql -q -v ON_ERROR_STOP=1 -c "DROP TABLE $SCHEMA.\"order\" CASCADE;"
-"$PROTO" --db "$TARGET" schema "$SCHEMA" --pyo3 --mappers --prune \
-    --out-dir "$WORK/src/model" --mapper-dir "$WORK/src/mapper" >/dev/null 2>&1
+# The operations come too: the Rust Data compiles without any feature
+# now, so a routing table still naming the dropped table would be a
+# crate that no longer builds — which is the drift showing, as it should.
+"$PROTO" --db "$TARGET" schema "$SCHEMA" --pyo3 --mappers --operations --prune \
+    --out-dir "$WORK/src/model" --mapper-dir "$WORK/src/mapper" \
+    --operation-dir "$WORK/src/operation" >/dev/null 2>&1
 [ ! -f "$WORK/src/model/order.rs" ] || {
     echo "  the dropped table's model is still there" >&2
     exit 1
 }
+if grep -q 'proto_smoke.order' "$WORK/src/operation/data.rs"; then
+    echo "  the dropped table is still routed" >&2
+    exit 1
+fi
 [ -f "$WORK/src/model/handwritten.rs" ] || {
     echo "  --prune removed a file proto did not generate" >&2
     exit 1

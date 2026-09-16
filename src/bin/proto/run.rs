@@ -522,11 +522,9 @@ fn operation_target(
             "--operations needs --mappers: Data runs through them".to_string(),
         ));
     }
-    if !pyo3 {
-        return Err(Error::Usage(
-            "--operations needs --pyo3: Data takes its request from Python".to_string(),
-        ));
-    }
+    // The Rust `Data` needs no feature; only its Python class does,
+    // and that is gated item by item inside the file.
+    let _ = pyo3;
     dir.map(Some)
         .ok_or_else(|| Error::Usage("--operations needs --operation-dir".to_string()))
 }

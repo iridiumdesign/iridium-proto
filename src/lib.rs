@@ -13,7 +13,7 @@
 //! proto mapper shop.product            # its repository
 //! proto schema shop --out-dir src/model
 //! proto database --out-dir src/model --mapper-dir src/mapper --mappers
-//! proto schema shop --pyo3 --mappers --operations \
+//! proto schema shop --mappers --operations \
 //!     --out-dir src/model --mapper-dir src/mapper --operation-dir src/operation
 //! proto list [schema]                  # what is there
 //! proto config                         # what proto resolved

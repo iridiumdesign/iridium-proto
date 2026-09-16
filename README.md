@@ -327,6 +327,33 @@ insert never supplies them. A column with a *literal* default is
 piece of judgment `proto` makes about your schema, and it is what keeps
 the generated SQL static.
 
+Beside it, the patch — the other half of what a write takes:
+
+```rust
+/// What `update` sets on `shop.product`: each column it may write, or
+/// `None` to leave it as it is. A nullable column takes `Some(None)`
+/// to be set null. The key and the columns the database owns are not
+/// here, so a patch cannot retarget a row.
+#[derive(Debug, Clone, Default)]
+pub struct ProductPatch {
+    pub slug: Option<String>,
+    pub name: Option<String>,
+    pub status: Option<ProductStatus>,
+    pub price: Option<Option<Decimal>>,
+}
+
+impl ProductPatch {
+    pub fn apply(&self, row: &mut Product) { .. }
+}
+```
+
+`apply` sets what the patch carries on a row and leaves the rest,
+which is how the [`Data`](#operations) operation's `update` writes: the
+rows the query finds, each patched, each written back in full. A column
+whose type `proto` cannot clone — a generated enum or composite whose
+derives lack `Clone` — is left out of the patch, with a warning, since
+a patch is applied to every row.
+
 ## Mappers
 
 One repository struct per table, holding a pool and owning every
@@ -568,20 +595,88 @@ sibling module `super::<child>`, the layout `--out-dir` writes.
 
 ## Operations
 
-Above the mappers sits what an integrating engineer would otherwise
+Above the mappers sits the layer an integrating engineer would otherwise
 write by hand: a layer that takes a request, works out which mapper it
 is for, and runs it. `proto` generates it, because the routing — a
 table name to a mapper, a request's values to that mapper's column
 types — is what the type map already knows, and what drifts first when
 the schema moves.
 
-`Data` is the first operation. It takes its request from Python, so it
-comes with `--pyo3`:
+`Data` is the first operation: one request in, one outcome out, through
+whichever mapper the request names, with the table's own types in and
+out and no interpreter in the path.
 
 ```
-proto schema shop --pyo3 --mappers --operations \
+proto schema shop --mappers --operations \
     --out-dir src/model --mapper-dir src/mapper --operation-dir src/operation
 ```
+
+```rust
+use model::product::{NewProduct, ProductPatch};
+use operation::data::{Data, Op, Outcome, Request, Row, Rows, Values};
+
+let data = Data::new(&pool);
+let found = data
+    .execute(Request {
+        table: "shop.product",
+        op: Op::Find,
+        query: Query::new().eq("status", ProductStatus::Active).order_by_desc("created_at").limit(20),
+        values: None,
+    })
+    .await?;
+let Outcome::Rows(Rows::ShopProduct(rows)) = found else { unreachable!() };
+
+let made = data
+    .execute(Request {
+        table: "product",
+        op: Op::Create,
+        query: Query::new(),
+        values: Some(Values::ShopProductInput(NewProduct { slug: "dovetail-saw".into(), .. })),
+    })
+    .await?;                                         // Outcome::Row(Row::ShopProduct(..))
+data.execute(Request {
+        table: "product",
+        op: Op::Update,
+        query: Query::new().eq("id", id),
+        values: Some(Values::ShopProductPatch(ProductPatch {
+            name: Some("Dovetail saw, 10in".into()),
+            ..Default::default()
+        })),
+    })
+    .await?;                                         // Outcome::Rows(..), as written
+data.execute(Request { table: "product", op: Op::Delete, query: Query::new().eq("id", id), values: None })
+    .await?;                                         // Outcome::Deleted(1)
+```
+
+`table` is `schema.table`, or the bare name where only one table has
+it. `op` is `Find`, `Count`, `Create`, `Update` or `Delete`. `query` is
+what the mapper's `find_where` takes — the conditions, the order, the
+limit and the offset; `count` uses its conditions only, and `create`
+does not read it. `values` is typed for the table: `ShopProductInput`
+carries the `New…` that `create` inserts, and `ShopProductPatch` the
+model's `…Patch` — what `update` sets on every row the query finds.
+What comes back is an
+`Outcome`: `Rows` for `find` and `update`, `Row` for `create`, `Count`,
+or `Deleted`; `Rows` and `Row` have one variant per table, named by
+schema and table, so two tables of one name in two schemas stay apart.
+What can go wrong is the operation's own `Error`: a table `Data` does
+not route to, an operation the table cannot do — `create` on a view,
+`delete` on a table without a key — a write without its values or with
+another table's, or the database's error.
+
+The routing table is one generated method, `execute`, and it is not
+yours to edit: `proto` rewrites it whenever a table arrives or leaves,
+so a route added by hand is lost on the next run. The enums are
+replaced whole, as the generated enums are. Everything else follows
+the mappers' rule — each method `proto` owns says so, and an operation
+of your own beside `Data` stays where you put it. A table whose class
+would be called `Data` is refused before anything is written.
+
+### From Python
+
+With `--pyo3` a Python class of the same name wraps it: the request
+dict is read as the table's types, runs through the Rust `Data`, and
+the outcome comes back as the table's classes.
 
 ```python
 data = shop.Data(db)
@@ -596,28 +691,22 @@ data.execute({"table": "product", "op": "update",
 data.execute({"table": "product", "op": "delete", "where": {"id": made.id}})
 ```
 
-`table` is `schema.table`, or the bare name where only one table has
-it. `op` is `find`, `count`, `create`, `update` or `delete`. `where`,
+`op` is `find`, `count`, `create`, `update` or `delete`. `where`,
 `order_by`, `limit` and `offset` are what the mapper's `find_where`
-takes. `values` is what `create` inserts, read through the `New…`
-constructor so the same columns are required, or what `update` sets on
-every row `where` finds, through the class's own setters so the same
-types are enforced. `update` writes what the mapper's `update` writes:
-the key addresses the row and cannot be set, nor can a column the
-database owns. `find` and `update` return the rows, `create` the row,
+takes, each value read as its column's own type. `values` is what
+`create` inserts, read through the `New…` constructor so the same
+columns are required, or what `update` sets, each value read as its
+column's type into the table's patch: the key and a column the
+database owns are refused with a `ValueError`, a value of the wrong
+type is a `TypeError`, and a name that is not a column is a
+`KeyError`. `find` and `update` return the rows, `create` the row,
 `count` and `delete` a number. A table that is not routed is a
-`KeyError`; an operation a table cannot do — `create` on a view, `delete`
-on a table without a key — is a `ValueError` naming both. A table whose
-class would be called `Data` is refused before anything is written.
+`KeyError`; an operation a table cannot do is a `ValueError` naming
+both; the database's error is a `ProtoError`.
 
-The routing table is one generated function, `route`, and it is not
-yours to edit: `proto` rewrites it whenever a table arrives or leaves,
-so a route added by hand is lost on the next run. Everything else
-follows the mappers' rule — each method `proto` owns says so, and an
-operation of your own beside `Data` stays where you put it.
-
-`Data` lands as `data.rs` in `--operation-dir`, behind the pyo3
-feature, with its own `register`; call it after the mappers':
+`Data` lands as `data.rs` in `--operation-dir`. The Rust is there
+without any feature; the Python class inside it is behind the pyo3
+feature, with its own `register` — call it after the mappers':
 
 ```rust
 #[pymodule]

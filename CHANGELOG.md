@@ -14,6 +14,12 @@ class as a thin wrapper over it ([#17]). See the
 
 ### Added
 
+- A `…Patch` type beside every `New…`, with `--input`: every column an
+  update may write as `Option`, `None` to leave it and `Some(None)` to
+  set a nullable column null, the key and the database's own columns
+  absent, and `apply`, which sets what the patch carries on a row. The
+  other half of what a write takes; the `Data` operation's `update` is
+  written with it. ([#17])
 - `Data.find(table, pk, user_id, request_id)`, `Data.store(model, …)`
   and `Data.update(model, …)`: by key and by type, each writing one
   line to the `proto.data` logger with both ids before returning. With
@@ -33,6 +39,25 @@ class as a thin wrapper over it ([#17]). See the
 
 ### Changed
 
+- `Data` is Rust. `Data::new(&pool).execute(Request { table, op, query,
+  values })` routes by table name to the mapper that serves it and
+  returns an `Outcome`: `Rows` for `find` and `update`, `Row` for
+  `create`, `Count`, `Deleted`, with one variant per table named by
+  schema and table (`Rows::ShopProduct`). `Values` carries a table's
+  `New…` for `create` or its `…Patch` for `update`. Errors are the
+  operation's own `Error`. The Python class of
+  the same name is now a wrapper: the dict is read as the table's
+  types, runs through the Rust, and the outcome comes back as the
+  table's classes, with the same exceptions as before. `--operations`
+  no longer needs `--pyo3`, and `operation/mod.rs` declares `data`
+  unconditionally. An `operation/data.rs` from 0.1.1 has the old shape
+  and does not reconcile: delete it and regenerate. ([#17])
+- The mappers' Python bridge gained `block_on`, which runs any future
+  on the `Database`'s runtime with the GIL released, for a call whose
+  error is its own; `run` stays for the mapper calls.
+- Reconcile keys a trait impl by its trait as well as its type, so
+  `impl Display for Error` and `impl From<E> for Error` are two blocks
+  and a method of one cannot land in the other.
 - Every statement a mapper writes names its columns; none says `*`.
   The finders, `list`, the children loaders, `find_where`, the
   `RETURNING` of `create` and `update`, and under `--sql server` the

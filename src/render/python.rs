@@ -259,6 +259,17 @@ pub fn run<T: Send>(
     py.detach(|| db.runtime.block_on(future)).map_err(error)
 }}
 
+/// Run any future to completion on `db`, releasing the GIL meanwhile:
+/// what `run` does for a mapper call, for a call whose error is its
+/// own to report.
+pub fn block_on<T: Send>(
+    db: &Database,
+    py: Python<'_>,
+    future: impl std::future::Future<Output = T> + Send,
+) -> T {{
+    py.detach(|| db.runtime.block_on(future))
+}}
+
 /// A database error as Python sees it.
 pub fn error(e: sqlx::Error) -> PyErr {{
     ProtoError::new_err(e.to_string())

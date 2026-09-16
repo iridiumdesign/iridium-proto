@@ -131,7 +131,7 @@ pub fn map(ty: &PgType, generate: &Generate) -> Mapped {
 /// Whether a derive list names `trait_`, bare or by path: `Clone` and
 /// `std::clone::Clone` both do, since the list is written into the
 /// `#[derive]` as it is and either compiles.
-fn has_derive(derives: &[String], trait_: &str) -> bool {
+pub(crate) fn has_derive(derives: &[String], trait_: &str) -> bool {
     derives
         .iter()
         .any(|d| d.rsplit("::").next() == Some(trait_))
