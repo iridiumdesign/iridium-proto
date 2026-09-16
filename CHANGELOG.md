@@ -39,6 +39,9 @@ class as a thin wrapper over it ([#17]). See the
 
 ### Changed
 
+- The README is the pitch, the workflow and a map; the reference moved
+  to a page per subject under `docs/`. The crate docs point there, and
+  `config`, `introspect` and `render` each carry an example. ([#23])
 - `Data` is Rust. `Data::new(&pool).execute(Request { table, op, query,
   values })` routes by table name to the mapper that serves it and
   returns an `Outcome`: `Rows` for `find` and `update`, `Row` for
@@ -158,5 +161,6 @@ moves, correcting files rather than overwriting them.
 [#17]: https://github.com/iridiumdesign/iridium-proto/issues/17
 [#19]: https://github.com/iridiumdesign/iridium-proto/issues/19
 [#21]: https://github.com/iridiumdesign/iridium-proto/issues/21
+[#23]: https://github.com/iridiumdesign/iridium-proto/issues/23
 [#24]: https://github.com/iridiumdesign/iridium-proto/issues/24
 [#25]: https://github.com/iridiumdesign/iridium-proto/issues/25
