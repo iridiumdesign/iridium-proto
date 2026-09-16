@@ -84,6 +84,13 @@ CREATE TABLE $SCHEMA.item (
     parent_id  uuid REFERENCES $SCHEMA.item(id),
     size       $SCHEMA.dimensions
 );
+-- A composite key, for Data.find to be addressed by a tuple.
+CREATE TABLE $SCHEMA.pair (
+    a    integer NOT NULL,
+    b    text NOT NULL,
+    note text,
+    PRIMARY KEY (a, b)
+);
 -- A second schema with a table of the same name, for the database run
 -- below: two ItemMappers that must land in different submodules.
 DROP SCHEMA IF EXISTS ${SCHEMA}_2 CASCADE;
@@ -459,6 +466,89 @@ assert data.execute({"table": "item", "op": "delete",
                      "where": {"slug": "rerouted"}}) == 1
 assert items.find_by_id(one.id) is None
 print("  Data    routes each request to its mapper")
+
+# find, store and update: by key and by type, each one log line on the
+# proto.data logger carrying the ids that trace a request.
+import logging
+records = []
+class Grab(logging.Handler):
+    def emit(self, record):
+        records.append(record)
+log = logging.getLogger("proto.data")
+log.addHandler(Grab())
+log.setLevel(logging.INFO)
+
+stored = data.store(protopy.NewItem("stored", price=decimal.Decimal("2.50")), "brad", "req-1")
+assert isinstance(stored, protopy.Item) and stored.slug == "stored", stored
+got = data.find("item", stored.id, "brad", "req-2")
+assert got is not None and got.id == stored.id, got
+assert data.find("proto_python.item", uuid.uuid4(), "brad", "req-3") is None
+got.slug = "restored"
+back = data.update(got, "brad", "req-4")
+assert back.slug == "restored" and items.find_by_id(stored.id).slug == "restored"
+for call, error in (
+    (lambda: data.find("nowhere", 1, "brad", "req-5"), protopy.OperationError),
+    (lambda: data.store(got, "brad", "req-6"), protopy.OperationError),   # a row, not an input
+    (lambda: data.update(protopy.NewItem("x"), "brad", "req-7"), protopy.OperationError),
+    (lambda: data.find("item", "not-a-uuid", "brad", "req-8"), TypeError),  # the key's type
+    (lambda: data.find("item", [stored.id], "brad", "req-15"), protopy.OperationError),  # one value, not a list
+):
+    try:
+        call()
+    except error:
+        pass
+    else:
+        raise AssertionError(f"req did not raise {error.__name__}")
+items.delete(stored.id)
+try:
+    data.update(back, "brad", "req-9")
+except protopy.DatabaseError as e:
+    assert isinstance(e, protopy.OperationError), "DatabaseError is an OperationError"
+else:
+    raise AssertionError("updating a row that is gone did not raise DatabaseError")
+assert issubclass(protopy.PermissionError, protopy.OperationError)
+assert issubclass(protopy.OperationError, Exception)
+
+# A composite key is a tuple in column order — any sequence — with each
+# value read as its column's type, and the wrong length refused.
+pair = data.store(protopy.NewPair(1, "x", note="first"), "brad", "req-10")
+assert isinstance(pair, protopy.Pair) and pair.note == "first", pair
+assert data.find("pair", (1, "x"), "brad", "req-11").note == "first"
+assert data.find("pair", [1, "x"], "brad", "req-12").note == "first"
+assert data.find("pair", (2, "x"), "brad", "req-13") is None
+for bad, error in (((1,), protopy.OperationError), ((1, "x", 3), protopy.OperationError),
+                   (("x", 1), TypeError), (([1], "x"), protopy.OperationError)):
+    try:
+        data.find("pair", bad, "brad", "req-16")
+    except error:
+        pass
+    else:
+        raise AssertionError(f"pk {bad} did not raise {error.__name__}")
+pair.note = "second"
+assert data.update(pair, "brad", "req-17").note == "second"
+
+# The ids come from outside; a line break in one is written escaped,
+# so the record stays one line.
+data.find("item", stored.id, "evil\nuser", "req-14\r")
+
+lines = {r.getMessage(): r.levelno for r in records}
+for expected, level in (
+    (f"request_id=req-1 user_id=brad store NewItem proto_python.item pk={stored.id}: ok", logging.INFO),
+    (f"request_id=req-2 user_id=brad find item pk={stored.id}: ok", logging.INFO),
+    (f"request_id=req-4 user_id=brad update Item proto_python.item pk={stored.id}: ok", logging.INFO),
+    ("request_id=req-10 user_id=brad store NewPair proto_python.pair pk=(1, x): ok", logging.INFO),
+    ("request_id=req-11 user_id=brad find pair pk=(1, 'x'): ok", logging.INFO),
+    ("request_id=req-17 user_id=brad update Pair proto_python.pair pk=(1, x): ok", logging.INFO),
+    (f"request_id=req-14\\r user_id=evil\\nuser find item pk={stored.id}: not found", logging.INFO),
+    ("request_id=req-5 user_id=brad find nowhere pk=1: failed: OperationError: `nowhere` is not a table Data routes to", logging.ERROR),
+):
+    assert lines.get(expected) == level, (expected, lines)
+assert any(m.startswith("request_id=req-3 user_id=brad find proto_python.item pk=")
+           and m.endswith(": not found") for m in lines), lines
+assert any(m.startswith("request_id=req-9 user_id=brad update Item: failed: DatabaseError:")
+           for m in lines), lines
+assert all("\n" not in m and "\r" not in m for m in lines), lines
+print("  Data    finds, stores and updates, one log line each")
 PY
 )
 

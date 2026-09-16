@@ -617,6 +617,46 @@ fn shop(m: &Bound<'_, PyModule>) -> PyResult<()> {
 `--operation-dir`, with every table qualified; the bare name is a
 schema run's shorthand.
 
+Beside `execute`, three methods for the common case, each taking the
+ids that trace a request through a service:
+
+```python
+row = data.find("shop.product", pk, user_id, request_id)   # the row, or None
+row = data.store(NewProduct("dovetail-saw", "Dovetail saw"), user_id, request_id)
+row.name = "Dovetail saw, 10in"
+row = data.update(row, user_id, request_id)                # the row as written
+```
+
+`find` addresses a row by the table's key, read as the key's own type
+— a tuple in column order for a composite key. One value per key
+column: a list is several, and is refused rather than found by `ANY`.
+`store` takes an input, a `New…`, and routes by its type; `update`
+takes a row and writes it back in full, as the mapper's `update` does.
+Each writes one line to the `proto.data` logger before returning,
+`INFO` when it went through and `ERROR` with the error when it did
+not, carrying `request_id=` and `user_id=`, the operation, the table
+and the key — for `store`, the key as the database filled it in:
+
+```
+request_id=8f3a… user_id=brad find shop.product pk=…: ok
+request_id=8f3a… user_id=brad store NewProduct shop.product pk=…: ok
+request_id=8f3a… user_id=brad update Product: failed: DatabaseError: …
+```
+
+It is one line whatever the ids carry: a control character in an id,
+a key or an error is written as its escape, so a caller's input cannot
+end the record or start another.
+
+Three exceptions come with the module. `OperationError` is what an
+operation raises unless it has a more specific one: a table `Data`
+does not route to, a model of a type it does not know, a table with no
+key. `DatabaseError`, an `OperationError`, is the database refusing or
+failing, in the driver's words — the mapper's `ProtoError`, as the
+operation reports it. `PermissionError`, also an `OperationError`, is
+raised by nothing generated: it is there for an operation of your own.
+A value that is not the key's type is a `TypeError`, as it is in a
+`where`.
+
 ## Type mapping
 
 | Postgres | Rust |
