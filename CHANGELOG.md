@@ -8,9 +8,12 @@ file says so when it does.
 
 ## [Unreleased]
 
-Planned for 0.1.2: a Rust-native `Data` operation, with the Python
-class as a thin wrapper over it ([#17]). See the
-[0.1.2 milestone](https://github.com/iridiumdesign/iridium-proto/milestone/1).
+## [0.1.2] — 2026-09-16
+
+The operation layer in Rust, and the generated code tightened around
+it: `Data` with the table's own types in and out, a patch beside every
+input, children fields named for their table, every statement naming
+its columns, and the reference split into a page per subject.
 
 ### Added
 
@@ -147,7 +150,8 @@ moves, correcting files rather than overwriting them.
 - Identifiers quoted and values bound, held by `tests/injection.rs` and
   the round trip in CI against PostgreSQL 16 and 17.
 
-[Unreleased]: https://github.com/iridiumdesign/iridium-proto/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/iridiumdesign/iridium-proto/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/iridiumdesign/iridium-proto/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/iridiumdesign/iridium-proto/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/iridiumdesign/iridium-proto/releases/tag/v0.1.0
 [#5]: https://github.com/iridiumdesign/iridium-proto/pull/5
