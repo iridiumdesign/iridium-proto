@@ -507,7 +507,10 @@ this row's `id` — and then asks each child to do the same, all the way
 down. A parent and its children built by hand agree before anything is
 saved, however deep the tree. A nullable foreign key, the tree's
 `parent_id`, takes `Some(id)`. A table with no children fields still
-has the method, doing nothing, so a caller can rely on it.
+has the method, doing nothing, so a caller can rely on it. The key is
+copied per child, so a key of a generated enum or composite type needs
+`Clone` among its derives; without it that field is left alone, with a
+warning that says so.
 
 ```rust
 one.variant_children.push(Variant { product_id: Uuid::nil(), ..variant });
@@ -696,7 +699,11 @@ geometry = "geo_types::Geometry<f64>"
 ```
 
 `[generate.types]` overrides the built-ins too, so a project that wants
-`bigdecimal::BigDecimal` for `numeric` says so there.
+`bigdecimal::BigDecimal` for `numeric` says so there. A type named there
+is used wherever the column's type goes, so it has to carry what the
+generated code asks of it: the `sqlx` traits the mapper binds and
+decodes with, and `Clone` when the column is a key that
+`set_id_on_children` copies into child rows.
 
 Introspection runs with an empty `search_path`, so every type in the
 generated SQL is written out with its schema. A cast like

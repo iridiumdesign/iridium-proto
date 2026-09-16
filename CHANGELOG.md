@@ -25,9 +25,11 @@ class as a thin wrapper over it ([#17]). See the
   every child row it holds and on down through theirs, in memory, so a
   parent and its children built by hand agree before a save, however
   deep. A nullable foreign key takes `Some`; a key that is not `Copy`
-  is cloned. A table with no children fields has it too, doing
-  nothing. Under `--pyo3` it is a method of the Python class and
-  changes the object in place. ([#21])
+  is cloned, and a key whose type proto cannot clone — a generated
+  enum or composite whose derives lack `Clone` — is skipped with a
+  warning. A table with no children fields has it too, doing nothing.
+  Under `--pyo3` it is a method of the Python class and changes the
+  object in place. ([#21])
 
 ### Changed
 

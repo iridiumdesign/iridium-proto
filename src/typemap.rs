@@ -25,6 +25,11 @@ pub struct Mapped {
     /// a clippy warning in the generated crate and in the other a
     /// compile error, so an unknown type is assumed not to be.
     pub copy: bool,
+    /// Whether the type is `Clone`, as far as proto can see. Every
+    /// built-in mapping is; a generated enum or struct is whatever its
+    /// derives say; a type from `[generate.types]` is assumed to be,
+    /// which the README asks of it.
+    pub clone: bool,
 }
 
 impl Mapped {
@@ -36,6 +41,7 @@ impl Mapped {
             imports: imports.iter().map(|s| (*s).to_string()).collect(),
             unmapped: None,
             copy: false,
+            clone: true,
         }
     }
 
@@ -94,24 +100,27 @@ pub fn map(ty: &PgType, generate: &Generate) -> Mapped {
             let inner = map(inner, generate);
             Mapped {
                 text: format!("Vec<{}>", inner.text),
-                // A Vec is not Copy however Copy its elements are.
+                // A Vec is not Copy however Copy its elements are, and
+                // is Clone only when they are.
                 copy: false,
                 ..inner
             }
         }
         PgType::Enum { name, .. } => override_for(name, &generate.types).unwrap_or_else(|| {
             Mapped {
-                // The enum is generated, so whether it is Copy is
-                // whatever the configured derives say.
+                // The enum is generated, so whether it is Copy or Clone
+                // is whatever the configured derives say.
                 copy: generate.enum_derives.iter().any(|d| d == "Copy"),
+                clone: generate.enum_derives.iter().any(|d| d == "Clone"),
                 ..Mapped::borrowed(naming::pascal_case(name), &[])
             }
         }),
         PgType::Composite { name, .. } => {
             override_for(name, &generate.types).unwrap_or_else(|| Mapped {
-                // The struct is generated, so whether it is Copy is
-                // whatever the configured derives say.
+                // The struct is generated, so whether it is Copy or
+                // Clone is whatever the configured derives say.
                 copy: generate.composite_derives.iter().any(|d| d == "Copy"),
+                clone: generate.composite_derives.iter().any(|d| d == "Clone"),
                 ..Mapped::borrowed(naming::pascal_case(name), &[])
             })
         }
@@ -213,6 +222,26 @@ mod tests {
     fn arrays_wrap_their_element() {
         let ty = PgType::Array(Box::new(PgType::Scalar("text".into())));
         assert_eq!(map(&ty, &plain()).text, "Vec<String>");
+    }
+
+    /// Whether a type can be cloned is known for what proto generates
+    /// and assumed for what it is pointed at.
+    #[test]
+    fn clone_follows_the_derives_where_proto_can_see_them() {
+        let mut generate = Generate::default();
+        assert!(map(&PgType::Scalar("text".into()), &generate).clone);
+        let status = PgType::Enum {
+            schema: "shop".into(),
+            name: "product_status".into(),
+        };
+        assert!(map(&status, &generate).clone);
+        generate.enum_derives = vec!["Debug".into()];
+        assert!(!map(&status, &generate).clone);
+        assert!(!map(&PgType::Array(Box::new(status.clone())), &generate).clone);
+        generate
+            .types
+            .insert("product_status".into(), "crate::Status".into());
+        assert!(map(&status, &generate).clone);
     }
 
     #[test]

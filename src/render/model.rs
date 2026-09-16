@@ -302,6 +302,7 @@ fn key_block(
     let qualified = format!("{}.{}", table.schema, table.name);
     let mut doc = String::new();
     let mut body = String::new();
+    let mut skipped = 0;
     for child in children {
         let (field, c_table, c_column) = (&child.field, &child.child.table, &child.child.column);
         let ref_column = &child.child.ref_column;
@@ -313,10 +314,24 @@ fn key_block(
                 "{qualified}: `set_id_on_children` cannot set `{c_table}.{c_column}`, which \
                  is NOT NULL, from `{ref_column}`, which is nullable; `{field}` is left as it is"
             ));
+            skipped += 1;
             continue;
         }
-        let copy = typemap::map(&parent.ty, opts.generate).copy;
-        let clone = if copy { "" } else { ".clone()" };
+        // The key is copied per child, which needs Clone where it is
+        // not Copy. Proto can see that for a type it generates; a type
+        // from [generate.types] is taken at its word.
+        let mapped = typemap::map(&parent.ty, opts.generate);
+        if !mapped.copy && !mapped.clone {
+            warnings.push(format!(
+                "{qualified}: `set_id_on_children` copies `{ref_column}` into each \
+                 `{field}` row, and its type `{}` is not Clone; add `Clone` to its \
+                 derives in [generate], or `{field}` is left as it is",
+                mapped.text
+            ));
+            skipped += 1;
+            continue;
+        }
+        let clone = if mapped.copy { "" } else { ".clone()" };
         let value = if child.child.not_null || !parent.not_null {
             format!("key{clone}")
         } else {
@@ -345,11 +360,16 @@ fn key_block(
     };
     let owned = indent(OWNED, 4);
     if body.is_empty() {
+        let why = if skipped == 0 {
+            "holds no children fields"
+        } else {
+            "has no children field that can take it (the run said why)"
+        };
         return format!(
             r#"
 {pymethods}impl {name} {{
     /// The row's key, copied into every child row it holds. `{qualified}`
-    /// holds no children fields, so there is nothing to set; the method
+    /// {why}, so there is nothing to set; the method
     /// is here so every row type has it.
 {owned}    pub fn set_id_on_children(&mut self) {{}}
 }}
@@ -930,11 +950,54 @@ mod tests {
             "{}",
             rendered.code
         );
+        // The doc says the field is there and cannot take the key, not
+        // that there is no field.
+        assert!(
+            rendered
+                .code
+                .contains("has no children field that can take it (the run said why)"),
+            "{}",
+            rendered.code
+        );
         assert!(
             rendered
                 .warnings
                 .iter()
                 .any(|w| w.contains("`set_id_on_children`") && w.contains("`variant_children`")),
+            "{:?}",
+            rendered.warnings
+        );
+
+        // A key of a type proto cannot clone — a generated enum whose
+        // derives lack Clone — is the same: left alone, and said.
+        let mut model = fixture::product();
+        let id = model
+            .table
+            .columns
+            .iter_mut()
+            .find(|c| c.name == "id")
+            .unwrap();
+        id.ty = PgType::Enum {
+            schema: "shop".into(),
+            name: "product_status".into(),
+        };
+        let generate = Generate {
+            enum_derives: vec!["Debug".into()],
+            ..Generate::default()
+        };
+        let rendered = model_file(&model, &fixture::opts(&generate, Strategy::Embedded), None);
+        assert!(
+            rendered
+                .code
+                .contains("pub fn set_id_on_children(&mut self) {}"),
+            "{}",
+            rendered.code
+        );
+        assert!(
+            rendered
+                .warnings
+                .iter()
+                .any(|w| w.contains("`ProductStatus` is not Clone")),
             "{:?}",
             rendered.warnings
         );
