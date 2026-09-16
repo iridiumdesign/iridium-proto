@@ -139,6 +139,7 @@ async fn run(
                         *pyo3,
                     )?;
                     if operation_dir.is_some()
+                        && *pyo3
                         && let Some(taken) = render::reserved_class(&models, "Data")
                     {
                         return Err(reserved_data(&taken));
@@ -227,6 +228,7 @@ async fn run(
                     continue;
                 }
                 if operation_dir.is_some()
+                    && *pyo3
                     && let Some(taken) = render::reserved_class(&models, "Data")
                 {
                     return Err(reserved_data(&taken));
@@ -323,8 +325,12 @@ async fn run(
                 }
             }
             // One Data over every schema, at the root, every table
-            // qualified by its schema.
-            if let Some(operation_dir) = operation_dir {
+            // qualified by its schema. Nothing over an empty database:
+            // there would be nothing to route, and the query module
+            // `Data` imports is not written either.
+            if let Some(operation_dir) = operation_dir
+                && !written.is_empty()
+            {
                 let sources: Vec<Source> = groups
                     .iter()
                     .map(|(schema, module, models)| Source {
@@ -506,8 +512,9 @@ fn mapper_target<'a>(
     Ok(Some((dir, migrations)))
 }
 
-/// Where the operations go. `Data` takes its request from Python and
-/// runs it through the mappers, so it needs both to exist.
+/// Where the operations go. `Data` runs through the mappers, so they
+/// have to exist; the Python class inside it stands on the mappers'
+/// bridge, which `--pyo3` writes, and is gated on the feature itself.
 fn operation_target(
     operations: bool,
     dir: Option<&Path>,
@@ -522,11 +529,9 @@ fn operation_target(
             "--operations needs --mappers: Data runs through them".to_string(),
         ));
     }
-    if !pyo3 {
-        return Err(Error::Usage(
-            "--operations needs --pyo3: Data takes its request from Python".to_string(),
-        ));
-    }
+    // The Rust `Data` needs no feature; only its Python class does,
+    // and that is gated item by item inside the file.
+    let _ = pyo3;
     dir.map(Some)
         .ok_or_else(|| Error::Usage("--operations needs --operation-dir".to_string()))
 }

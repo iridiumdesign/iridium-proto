@@ -166,7 +166,7 @@ pub enum Command {
         #[arg(long)]
         mappers: bool,
 
-        /// Also generate the operations; requires --mappers, --pyo3 and
+        /// Also generate the operations; requires --mappers and
         /// --operation-dir
         #[arg(long)]
         operations: bool,
@@ -211,7 +211,7 @@ pub enum Command {
         #[arg(long)]
         mappers: bool,
 
-        /// Also generate the operations; requires --mappers, --pyo3 and
+        /// Also generate the operations; requires --mappers and
         /// --operation-dir
         #[arg(long)]
         operations: bool,

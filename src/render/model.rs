@@ -9,7 +9,7 @@ use super::{
     OWNED, Opts, dedupe_composites, dedupe_enums, derive_line, doc_comment, escape,
     generated_composites, has_serde, header, import_block, indent, reexport_block, sqlx_type_name,
 };
-use crate::introspect::{Column, Model, PgComposite, PgEnum, Table};
+use crate::introspect::{Column, Model, PgComposite, PgEnum, PgType, Table};
 use crate::naming;
 use crate::typemap;
 
@@ -62,6 +62,12 @@ pub fn model_file(model: &Model, opts: &Opts, enum_path: Option<&str>) -> Render
     ));
     if opts.inputs {
         body.push_str(&input_block(&model.table, opts, &mut imports));
+        body.push_str(&patch_block(
+            &model.table,
+            opts,
+            &mut imports,
+            &mut warnings,
+        ));
     }
 
     let source = format!("{}.{}", model.table.schema, model.table.name);
@@ -103,6 +109,12 @@ pub fn schema_file(models: &[Model], schema: &str, opts: &Opts) -> Rendered {
         ));
         if opts.inputs {
             body.push_str(&input_block(&model.table, opts, &mut imports));
+            body.push_str(&patch_block(
+                &model.table,
+                opts,
+                &mut imports,
+                &mut warnings,
+            ));
         }
         body.push('\n');
     }
@@ -681,6 +693,92 @@ impl {name} {{
     )
 }
 
+/// The patch `update` sets on a row: every column an update may write
+/// as `Option`, `None` to leave it, and `apply`, which sets what the
+/// patch carries on a row. Beside the input, since it is the other
+/// half of what a write takes: the `Data` operation routes one per
+/// table. The key and the columns the database owns are not in it. A
+/// column whose type proto cannot clone is left out, with a warning,
+/// since a patch is applied to every row a query finds.
+fn patch_block(
+    table: &Table,
+    opts: &Opts,
+    imports: &mut BTreeSet<String>,
+    warnings: &mut Vec<String>,
+) -> String {
+    let columns = table.update_columns();
+    if !table.writable() || columns.is_empty() {
+        return String::new();
+    }
+    let name = opts
+        .name_override
+        .clone()
+        .unwrap_or_else(|| naming::pascal_case(&table.name));
+    // `Clone` and `Default` the patch needs; `Debug` only where the row
+    // has it, since the patch holds the row's own types.
+    let mut patch_derives: Vec<String> = Vec::new();
+    if typemap::has_derive(&opts.generate.derives, "Debug") {
+        patch_derives.push("Debug".to_string());
+    }
+    patch_derives.extend(["Clone", "Default"].map(String::from));
+    let derives = derive_line(&patch_derives, imports);
+
+    let mut fields = String::new();
+    let mut sets = String::new();
+    for column in &columns {
+        let mapped = typemap::map(&column.ty, opts.generate);
+        if !mapped.copy && !mapped.clone {
+            // Only a generated type can lack Clone, and which list
+            // governs it depends on what it is.
+            let mut inner = &column.ty;
+            while let PgType::Array(element) = inner {
+                inner = element;
+            }
+            let list = match inner {
+                PgType::Enum { .. } => "enum_derives",
+                PgType::Composite { .. } => "composite_derives",
+                _ => "derives",
+            };
+            warnings.push(format!(
+                "{}.{}: `{name}Patch` leaves `{}` out: its type `{}` is not Clone, and a \
+                 patch is applied to every row a query finds; add `Clone` to `{list}` \
+                 in [generate]",
+                table.schema, table.name, column.name, mapped.text
+            ));
+            continue;
+        }
+        imports.extend(mapped.imports.iter().cloned());
+        let ty = if column.not_null {
+            format!("Option<{}>", mapped.text)
+        } else {
+            format!("Option<Option<{}>>", mapped.text)
+        };
+        fields.push_str(&indent(&field(column, &ty, &patch_derives, None), 4));
+        let ident = naming::ident(&column.name);
+        let value = if mapped.copy {
+            "*value"
+        } else {
+            "value.clone()"
+        };
+        sets.push_str(&format!(
+            "        if let Some(value) = &self.{ident} {{\n            row.{ident} = {value};\n        }}\n"
+        ));
+    }
+
+    let owned = indent(OWNED, 4);
+    format!(
+        "\n/// What `update` sets on `{}.{}`: each column it may write, or\n\
+         /// `None` to leave it as it is. A nullable column takes `Some(None)`\n\
+         /// to be set null. The key and the columns the database owns are not\n\
+         /// here, so a patch cannot retarget a row.\n\
+         {derives}pub struct {name}Patch {{\n{fields}}}\n\n\
+         impl {name}Patch {{\n    \
+         /// Set what the patch carries on `row`, and leave the rest.\n\
+         {owned}    pub fn apply(&self, row: &mut {name}) {{\n{sets}    }}\n}}\n",
+        table.schema, table.name
+    )
+}
+
 /// A column with a literal default is optional on insert even when it is
 /// `NOT NULL`, because omitting it is how you ask for the default.
 fn input_type(column: &Column, ty: &str) -> String {
@@ -790,6 +888,66 @@ mod tests {
         let out = model_file(&wide, &opts, None).code;
         assert!(
             out.contains("    #[allow(clippy::too_many_arguments)]\n    #[new]"),
+            "{out}"
+        );
+    }
+
+    /// The patch: every updatable column as `Option`, a nullable one
+    /// twice over, and `apply`, copying or cloning as the type allows.
+    #[test]
+    fn the_patch_carries_what_update_may_set() {
+        let out = render(false).code;
+        for needed in [
+            "#[derive(Debug, Clone, Default)]\npub struct ProductPatch {",
+            "    pub slug: Option<String>,",
+            "    pub status: Option<ProductStatus>,",
+            "    pub price: Option<Option<Decimal>>,",
+            "    pub org_id: Option<Uuid>,",
+            "    pub fn apply(&self, row: &mut Product) {",
+            "        if let Some(value) = &self.slug {\n            row.slug = value.clone();\n        }",
+            "        if let Some(value) = &self.org_id {\n            row.org_id = *value;\n        }",
+        ] {
+            assert!(out.contains(needed), "missing {needed}\n{out}");
+        }
+        // shop.product: `id` has a server default, `created_at` too.
+        assert!(!out.contains("pub id: Option"), "{out}");
+        assert!(!out.contains("pub created_at: Option"), "{out}");
+        assert!(syn::parse_file(&out).is_ok(), "{out}");
+
+        // A column whose type proto cannot clone is left out, and said.
+        let generate = Generate {
+            enum_derives: vec!["sqlx::Type".into(), "Debug".into()],
+            ..Generate::default()
+        };
+        let mut opts = fixture::opts(&generate, Strategy::Embedded);
+        opts.inputs = true;
+        let rendered = model_file(&fixture::product(), &opts, None);
+        let patch = &rendered.code[rendered.code.find("pub struct ProductPatch").unwrap()..];
+        assert!(!patch.contains("pub status"), "{patch}");
+        assert!(patch.contains("pub slug"), "{patch}");
+        assert!(
+            rendered
+                .warnings
+                .iter()
+                .any(|w| w.contains("`ProductPatch` leaves `status` out")
+                    && w.contains("add `Clone` to `enum_derives`")),
+            "{:?}",
+            rendered.warnings
+        );
+
+        // The patch holds the row's own types, so it is Debug only where
+        // the row is.
+        let generate = Generate {
+            derives: ["sqlx::FromRow", "Clone", "Serialize", "Deserialize"]
+                .map(String::from)
+                .to_vec(),
+            ..Generate::default()
+        };
+        let mut opts = fixture::opts(&generate, Strategy::Embedded);
+        opts.inputs = true;
+        let out = model_file(&fixture::product(), &opts, None).code;
+        assert!(
+            out.contains("#[derive(Clone, Default)]\npub struct ProductPatch {"),
             "{out}"
         );
     }
