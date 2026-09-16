@@ -534,14 +534,17 @@ fn method(
 
         Kind::FindOne => {
             let (params, binds) = arguments(&op.columns, opts, imports);
+            let binds = binds.replace("        .bind", "    .bind");
             let method = &op.method;
             format!(
                 r#"
 /// Look up the row identified by `{key}`.
 {OWNED}pub async fn {method}(&self{params}) -> Result<Option<{row}>, sqlx::Error> {{
-    sqlx::query_as("{sql}")
-{binds}        .fetch_optional(self.pool)
-        .await
+    sqlx::query_as(
+        "{sql}",
+    )
+{binds}    .fetch_optional(self.pool)
+    .await
 }}
 "#
             )
@@ -549,14 +552,17 @@ fn method(
 
         Kind::FindMany => {
             let (params, binds) = arguments(&op.columns, opts, imports);
+            let binds = binds.replace("        .bind", "    .bind");
             let method = &op.method;
             format!(
                 r#"
 /// Every row whose `{key}` matches.
 {OWNED}pub async fn {method}(&self{params}) -> Result<Vec<{row}>, sqlx::Error> {{
-    sqlx::query_as("{sql}")
-{binds}        .fetch_all(self.pool)
-        .await
+    sqlx::query_as(
+        "{sql}",
+    )
+{binds}    .fetch_all(self.pool)
+    .await
 }}
 "#
             )
@@ -567,9 +573,11 @@ fn method(
 /// Every row. Put a bound on this before pointing it at a
 /// large table.
 {OWNED}pub async fn list(&self) -> Result<Vec<{row}>, sqlx::Error> {{
-    sqlx::query_as("{sql}")
-        .fetch_all(self.pool)
-        .await
+    sqlx::query_as(
+        "{sql}",
+    )
+    .fetch_all(self.pool)
+    .await
 }}
 "#
         ),
@@ -600,10 +608,11 @@ fn child_methods(
         (&child.child.schema, &child.child.table, &child.child.column);
     let function = quoting::qualified(c_schema, &format!("{c_table}_{}", child.call));
 
+    let columns = named(child.child.columns.iter().map(String::as_str), 16);
     let sql = escape(&match opts.strategy {
-        Strategy::Server => format!("SELECT * FROM {function}($1)"),
+        Strategy::Server => format!("SELECT {columns}\n           FROM {function}($1)"),
         Strategy::Embedded => format!(
-            "SELECT * FROM {} WHERE {} = $1",
+            "SELECT {columns}\n           FROM {}\n          WHERE {} = $1",
             quoting::qualified(c_schema, c_table),
             quoting::ident(c_column)
         ),
@@ -631,10 +640,12 @@ fn child_methods(
 /// `{}`, into `{field}`. One level: the children's own children
 /// are not loaded.
 {server_note}{OWNED}pub async fn load_{stem}(&self, row: &mut {row}) -> Result<(), sqlx::Error> {{
-    row.{field} = sqlx::query_as("{sql}")
-        .bind({by_ref}row.{ref_field})
-        .fetch_all(self.pool)
-        .await?;
+    row.{field} = sqlx::query_as(
+        "{sql}",
+    )
+    .bind({by_ref}row.{ref_field})
+    .fetch_all(self.pool)
+    .await?;
     Ok(())
 }}
 "#,
@@ -744,8 +755,36 @@ fn finder_wrapper<'o, 't>(
 
 // ── SQL ─────────────────────────────────────────────────────────────────────
 
+/// The columns a statement selects or returns, named — never `*` — so
+/// the statement says what the struct expects, and a column the table
+/// gained or lost is drift the file shows rather than a surprise at
+/// run time. Wrapped for the width of the file, each continuation
+/// line `indent` deep: what the keyword before the list leaves.
+fn named<'a>(columns: impl IntoIterator<Item = &'a str>, indent: usize) -> String {
+    let budget = 80 - indent;
+    let mut out = String::new();
+    let mut width = 0;
+    for (i, column) in columns.into_iter().enumerate() {
+        let ident = quoting::ident(column);
+        if i > 0 {
+            if width + 2 + ident.len() > budget {
+                out.push_str(",\n");
+                out.push_str(&" ".repeat(indent));
+                width = 0;
+            } else {
+                out.push_str(", ");
+                width += 2;
+            }
+        }
+        width += ident.len();
+        out.push_str(&ident);
+    }
+    out
+}
+
 /// The statement a method runs, in whichever strategy is in force.
 fn statement(table: &Table, opts: &Opts, op: &Operation) -> String {
+    let columns = named(table.columns.iter().map(|c| c.name.as_str()), 16);
     if opts.strategy == Strategy::Server {
         let arity = match op.kind {
             Kind::Insert => table.insert_columns().len(),
@@ -761,7 +800,7 @@ fn statement(table: &Table, opts: &Opts, op: &Operation) -> String {
         return if op.kind == Kind::Delete {
             format!("SELECT {call}")
         } else {
-            format!("SELECT * FROM {call}")
+            format!("SELECT {columns}\n           FROM {call}")
         };
     }
 
@@ -783,9 +822,10 @@ fn statement(table: &Table, opts: &Opts, op: &Operation) -> String {
             // template puts this literal at, so the statement stays
             // readable in the file that ends up holding it.
             format!(
-                "INSERT INTO {relation}\n             ({})\n         VALUES ({})\n         RETURNING *",
+                "INSERT INTO {relation}\n             ({})\n         VALUES ({})\n         RETURNING {}",
                 column_list(&columns, ", "),
-                values.join(", ")
+                values.join(", "),
+                named(table.columns.iter().map(|c| c.name.as_str()), 19)
             )
         }
         Kind::Update => {
@@ -796,21 +836,22 @@ fn statement(table: &Table, opts: &Opts, op: &Operation) -> String {
                 .map(|(i, c)| format!("{} = ${}", quoting::ident(&c.name), i + 1))
                 .collect();
             format!(
-                "UPDATE {relation}\n            SET {}\n          WHERE {}\n      RETURNING *",
+                "UPDATE {relation}\n            SET {}\n          WHERE {}\n      RETURNING {}",
                 sets.join(", "),
-                predicate(&op.columns, columns.len() + 1)
+                predicate(&op.columns, columns.len() + 1),
+                named(table.columns.iter().map(|c| c.name.as_str()), 16)
             )
         }
         Kind::Delete => format!("DELETE FROM {relation} WHERE {}", predicate(&op.columns, 1)),
         Kind::FindOne | Kind::FindMany => format!(
-            "SELECT * FROM {relation} WHERE {}",
+            "SELECT {columns}\n           FROM {relation}\n          WHERE {}",
             predicate(&op.columns, 1)
         ),
         Kind::List => {
-            let mut sql = format!("SELECT * FROM {relation}");
+            let mut sql = format!("SELECT {columns}\n           FROM {relation}");
             if !table.primary_key.is_empty() {
                 sql.push_str(&format!(
-                    " ORDER BY {}",
+                    "\n       ORDER BY {}",
                     column_list(&table.primary_key_columns(), ", ")
                 ));
             }
@@ -914,7 +955,10 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.contains("SELECT * FROM shop.product WHERE id = $1"),
+            out.contains(
+                "SELECT id, slug, name, status, price, org_id, created_at\n               \
+                 FROM shop.product\n              WHERE id = $1"
+            ),
             "{out}"
         );
         assert!(
@@ -926,10 +970,18 @@ mod tests {
     #[test]
     fn server_calls_functions_instead() {
         let out = render(Strategy::Server);
-        assert!(out.contains("SELECT * FROM shop.product_insert("), "{out}");
-        assert!(out.contains("SELECT * FROM shop.product_get($1)"), "{out}");
+        let columns =
+            "SELECT id, slug, name, status, price, org_id, created_at\n               FROM ";
         assert!(
-            out.contains("SELECT * FROM shop.product_by_slug($1)"),
+            out.contains(&format!("{columns}shop.product_insert(")),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!("{columns}shop.product_get($1)")),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!("{columns}shop.product_by_slug($1)")),
             "{out}"
         );
         // A void function is selected, not selected from.
@@ -993,6 +1045,64 @@ mod tests {
         );
     }
 
+    /// No statement says `*`: every read and every `RETURNING` names
+    /// the columns the struct expects, wrapped where a table is wide.
+    #[test]
+    fn statements_name_their_columns() {
+        let out = render(Strategy::Embedded);
+        assert!(!out.contains("SELECT *"), "{out}");
+        assert!(!out.contains("RETURNING *"), "{out}");
+        assert!(
+            out.contains(
+                "             RETURNING id, slug, name, status, price, org_id, created_at\","
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "          RETURNING id, slug, name, status, price, org_id, created_at\","
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "SELECT id, slug, name, status, price, org_id, created_at\n               \
+                 FROM shop.product\n           ORDER BY id\","
+            ),
+            "{out}"
+        );
+        let server = render(Strategy::Server);
+        assert!(!server.contains("SELECT *"), "{server}");
+        // The functions are called for the columns by name, the void
+        // one for its effect.
+        assert!(
+            server.contains("SELECT shop.product_delete($1)"),
+            "{server}"
+        );
+
+        // A wide table wraps its list under the first column.
+        let mut model = fixture::product();
+        for n in 0..12 {
+            model.table.columns.push(fixture::column(
+                &format!("attribute_number_{n:02}"),
+                crate::introspect::PgType::Scalar("text".into()),
+                "text",
+                false,
+            ));
+        }
+        let generate = Generate::default();
+        let out = mapper_file(&model, &fixture::opts(&generate, Strategy::Embedded)).code;
+        assert!(
+            out.contains(",\n                    attribute_number_"),
+            "{out}"
+        );
+        for line in out.lines().filter(|l| {
+            l.contains("SELECT ") || l.contains("RETURNING ") || l.contains("    attribute_number_")
+        }) {
+            assert!(line.len() <= 100, "{line}");
+        }
+    }
+
     #[test]
     fn a_parent_can_load_its_children() {
         let out = render(Strategy::Embedded);
@@ -1007,7 +1117,9 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.contains("SELECT * FROM shop.variant WHERE product_id = $1"),
+            out.contains(
+                "SELECT id, product_id, sku\n               FROM shop.variant\n              WHERE product_id = $1"
+            ),
             "{out}"
         );
         // The key is Copy, so it binds by value.
@@ -1025,7 +1137,9 @@ mod tests {
         // method says whose migration writes it.
         let server = render(Strategy::Server);
         assert!(
-            server.contains("SELECT * FROM shop.variant_by_product_id($1)"),
+            server.contains(
+                "SELECT id, product_id, sku\n               FROM shop.variant_by_product_id($1)"
+            ),
             "{server}"
         );
         assert!(
@@ -1076,7 +1190,9 @@ mod tests {
         let out = mapper_file(&fixture::category(), &opts).code;
         assert!(out.contains("row: &mut Category"), "{out}");
         assert!(
-            out.contains("SELECT * FROM shop.category WHERE parent_id = $1"),
+            out.contains(
+                "SELECT id, name, parent_id\n               FROM shop.category\n              WHERE parent_id = $1"
+            ),
             "{out}"
         );
         assert!(syn::parse_file(&out).is_ok(), "{out}");

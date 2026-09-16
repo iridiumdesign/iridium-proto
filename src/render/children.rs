@@ -205,6 +205,7 @@ mod tests {
             column: column.into(),
             not_null: true,
             ref_column: "id".into(),
+            columns: vec!["id".into(), column.into()],
             primary_key: vec!["id".into()],
             unique_keys: Vec::new(),
         }

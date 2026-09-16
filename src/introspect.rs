@@ -198,6 +198,9 @@ pub struct Child {
     pub not_null: bool,
     /// The column here that it refers to — the primary key, nearly always.
     pub ref_column: String,
+    /// The child's columns, in ordinal order, for the parent's loader to
+    /// name in its select list.
+    pub columns: Vec<String>,
     /// The child's own primary key, for naming the finder the parent's
     /// loader calls; see [`crate::render::plan::finder_call`].
     pub primary_key: Vec<String>,
@@ -578,14 +581,21 @@ pub async fn model(pool: &PgPool, schema: &str, table: &str) -> Result<Model> {
         .await?
     {
         let (child_schema, child_table): (String, String) = (row.get("schema"), row.get("table"));
-        // The child's keys name the finder the parent's loader calls.
+        // The child's keys name the finder the parent's loader calls,
+        // and its columns are what that loader selects.
         let (primary_key, unique_keys) = read_keys(pool, &child_schema, &child_table).await?;
+        let columns = read_columns(pool, &child_schema, &child_table)
+            .await?
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
         children.push(Child {
             schema: child_schema,
             table: child_table,
             column: row.get("column"),
             not_null: row.get("not_null"),
             ref_column: row.get("ref_column"),
+            columns,
             primary_key,
             unique_keys,
         });

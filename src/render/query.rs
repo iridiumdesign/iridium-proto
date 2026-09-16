@@ -79,7 +79,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             sql,
-            format!("SELECT * FROM t WHERE {QUOTED} = $1 ORDER BY {QUOTED} DESC")
+            format!("SELECT id, {QUOTED} FROM t WHERE {QUOTED} = $1 ORDER BY {QUOTED} DESC")
         );
     }
 
@@ -99,12 +99,16 @@ mod tests {
             .not_null("id")
             .select("t", COLUMNS)
             .unwrap();
-        assert!(!sql.contains("DROP"), "{sql}");
+        // The hostile value never reaches the text; the column of that
+        // name does, quoted, since the list names every column.
+        assert!(!sql.contains(hostile), "{sql}");
         assert_eq!(
             sql,
-            "SELECT * FROM t WHERE id = $1 AND id <> $2 AND id < $3 AND id <= $4 \
-             AND id > $5 AND id >= $6 AND id LIKE $7 AND id = ANY($8) \
-             AND id IS NULL AND id IS NOT NULL"
+            format!(
+                "SELECT id, {QUOTED} FROM t WHERE id = $1 AND id <> $2 AND id < $3 AND id <= $4 \
+                 AND id > $5 AND id >= $6 AND id LIKE $7 AND id = ANY($8) \
+                 AND id IS NULL AND id IS NOT NULL"
+            )
         );
     }
 
@@ -119,7 +123,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             sql,
-            "SELECT * FROM t WHERE id = $1 ORDER BY id LIMIT $2 OFFSET $3"
+            format!("SELECT id, {QUOTED} FROM t WHERE id = $1 ORDER BY id LIMIT $2 OFFSET $3")
         );
         let (sql, _) = Query::new()
             .eq("id", 1)
@@ -129,7 +133,7 @@ mod tests {
             .unwrap();
         assert_eq!(sql, "SELECT count(*) FROM t WHERE id = $1");
         let (sql, _) = Query::new().select("t", COLUMNS).unwrap();
-        assert_eq!(sql, "SELECT * FROM t");
+        assert_eq!(sql, format!("SELECT id, {QUOTED} FROM t"));
     }
 
     #[test]
@@ -139,7 +143,10 @@ mod tests {
             .cond("id", Op::IsNull, 0)
             .select("t", COLUMNS)
             .unwrap();
-        assert_eq!(sql, "SELECT * FROM t WHERE id >= $1 AND id IS NULL");
+        assert_eq!(
+            sql,
+            format!("SELECT id, {QUOTED} FROM t WHERE id >= $1 AND id IS NULL")
+        );
         assert_eq!(Op::from_suffix("in"), Some(Op::Any));
         assert_eq!(Op::from_suffix("between"), None);
         for suffix in ["eq", "ne", "lt", "lte", "gt", "gte", "like", "in"] {

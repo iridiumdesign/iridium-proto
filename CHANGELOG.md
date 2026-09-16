@@ -33,6 +33,13 @@ class as a thin wrapper over it ([#17]). See the
 
 ### Changed
 
+- Every statement a mapper writes names its columns; none says `*`.
+  The finders, `list`, the children loaders, `find_where`, the
+  `RETURNING` of `create` and `update`, and under `--sql server` the
+  calls, all select what the struct holds, in its order, wrapped where
+  a table is wide. The server functions themselves keep `*`: they
+  return the table's row type and the caller names the columns. The
+  catalog now records a child table's columns for its loader. ([#24])
 - Children fields are named after their child table with
   `children_field` as the suffix: `variant_children`, and
   `link_children_by_from_id` when the same child refers to the parent
@@ -126,4 +133,5 @@ moves, correcting files rather than overwriting them.
 [#17]: https://github.com/iridiumdesign/iridium-proto/issues/17
 [#19]: https://github.com/iridiumdesign/iridium-proto/issues/19
 [#21]: https://github.com/iridiumdesign/iridium-proto/issues/21
+[#24]: https://github.com/iridiumdesign/iridium-proto/issues/24
 [#25]: https://github.com/iridiumdesign/iridium-proto/issues/25

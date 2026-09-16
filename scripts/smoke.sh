@@ -666,10 +666,13 @@ grep -q "shade" "$WORK/src/mapper/item.rs" || {
     echo "  the new column never reached the statements" >&2
     exit 1
 }
-# Only the methods whose SQL changed should have moved.
-changed=$(diff "$WORK/mapper-before.rs" "$WORK/src/mapper/item.rs" | grep -c '^[<>]' || true)
-[ "$changed" -lt 20 ] || {
-    echo "  a column change rewrote more of the mapper than it should ($changed lines)" >&2
+# Only the statements should have moved. Every statement names its
+# columns, so each one's list now carries the new column: a line that
+# arrived says `shade`, or is a placeholder list renumbered for it —
+# the insert's VALUES and the update's WHERE.
+moved=$(diff "$WORK/mapper-before.rs" "$WORK/src/mapper/item.rs" | grep '^>' | grep -vc 'shade' || true)
+[ "$moved" -le 2 ] || {
+    echo "  a column change moved lines that do not carry it ($moved lines)" >&2
     diff "$WORK/mapper-before.rs" "$WORK/src/mapper/item.rs" >&2
     exit 1
 }

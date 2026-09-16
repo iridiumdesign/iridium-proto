@@ -392,17 +392,26 @@ pub async fn create(&self, new: &NewProduct) -> Result<Product, sqlx::Error> {
         "INSERT INTO shop.product
              (slug, name, status, price)
          VALUES ($1, $2, COALESCE($3, 'draft'::shop.product_status), $4)
-         RETURNING *",
+         RETURNING id, slug, name, status, price, org_id, created_at",
     )
     .bind(&new.slug)
     ...
 }
 ```
 
+Every statement names its columns; none says `*`. The statement then
+says what the struct expects, so a column the table gained or lost is
+drift the file shows and `--check` reports, rather than a surprise at
+run time, and the columns come back in the order the struct holds
+them. A wide table's list wraps under its first column.
+
 `--sql server` puts them in Postgres and calls them:
 
 ```rust
-sqlx::query_as("SELECT * FROM shop.product_insert($1, $2, $3, $4)")
+sqlx::query_as(
+    "SELECT id, slug, name, status, price, org_id, created_at
+       FROM shop.product_insert($1, $2, $3, $4)",
+)
 ```
 
 with a migration to match, written into `--migrations-dir`:
@@ -429,7 +438,10 @@ Functions are named `<table>_<operation>` in the table's own schema:
 `product_insert`, `product_get`, `product_by_slug`, `product_by_org_id`,
 `product_list`, `product_update`, `product_delete`. Readers are `STABLE`;
 writers are left `VOLATILE`. Readers return `SETOF`, so a miss is no rows
-rather than a row of nulls.
+rather than a row of nulls. The functions keep `*`: they return the
+table's row type, whatever it holds, and it is the caller that names
+the columns — so a column added later shows up in the mapper on the
+next run, not as a function that no longer matches its table.
 
 Both strategies generate the same Rust API — same methods, same
 signatures. Switching is a regeneration, not a rewrite of the callers.
@@ -949,8 +961,12 @@ what keeps a hostile name inside the data rather than loose in your
 source. A table named ``x"; DROP TABLE audit; --`` comes out as:
 
 ```rust
-sqlx::query_as("SELECT * FROM public.\"x\"\"; DROP TABLE audit; --\" WHERE id = $1")
-    .bind(id)
+sqlx::query_as(
+    "SELECT id, name
+       FROM public.\"x\"\"; DROP TABLE audit; --\"
+      WHERE id = $1",
+)
+.bind(id)
 ```
 
 One quoted identifier, one bound parameter, and nothing executable that

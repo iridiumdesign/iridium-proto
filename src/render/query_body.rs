@@ -223,12 +223,13 @@ impl Query {
         self
     }
 
-    /// `SELECT * FROM {from}` with the clause, the order, the limit and
-    /// the offset, and the arguments to run it with.
+    /// `SELECT <every column> FROM {from}` with the clause, the order,
+    /// the limit and the offset, and the arguments to run it with.
     ///
     /// `columns` is every column the query may name, as `(name,
     /// identifier)`: the Postgres name and the identifier as a statement
-    /// writes it. The mapper supplies it.
+    /// writes it. The mapper supplies it, and it is also the select
+    /// list: the statement names what the row type holds, never `*`.
     ///
     /// # Errors
     ///
@@ -240,7 +241,12 @@ impl Query {
         from: &str,
         columns: &[(&str, &str)],
     ) -> Result<(String, PgArguments), sqlx::Error> {
-        self.assemble(&format!("SELECT * FROM {from}"), columns, true)
+        let list = columns
+            .iter()
+            .map(|(_, ident)| *ident)
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.assemble(&format!("SELECT {list} FROM {from}"), columns, true)
     }
 
     /// `SELECT count(*) FROM {from}` with the clause. Order, limit and
