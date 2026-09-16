@@ -7,6 +7,18 @@
 //! config written for another tool can be pointed at directly rather than
 //! copied: `PROTO_CONFIG=~/.config/other/other.toml` works as long as the
 //! file carries the fields [`DbTarget`] needs.
+//!
+//! ```no_run
+//! use iridium_proto::config::{Config, config_path};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let path = config_path(None);
+//! let config = Config::load(&path)?.expect("a config file at the usual place");
+//! let (name, _target) = config.select(Some("dev"), &path)?;
+//! println!("generating from {name} with {} derives", config.generate.derives.len());
+//! # Ok(())
+//! # }
+//! ```
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;

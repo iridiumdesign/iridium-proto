@@ -109,6 +109,14 @@
 //! Database targets and generation defaults come from a TOML file, read
 //! from `$PROTO_CONFIG`, else `$XDG_CONFIG_HOME/proto/proto.toml`, else
 //! `~/.config/proto/proto.toml`. See [`config`] for the shape of it.
+//!
+//! # Reading on
+//!
+//! The README is the pitch and the workflow; the reference is a page per
+//! subject in the repository's `docs/` directory — configuration and
+//! commands, models, mappers, children, operations, type mapping,
+//! keeping in step, editing generated code, safety, and pyo3:
+//! <https://github.com/iridiumdesign/iridium-proto/tree/main/docs>.
 
 #![warn(missing_docs)]
 #![warn(clippy::doc_markdown)]

@@ -2,6 +2,35 @@
 //! a pure function of the catalog data in [`crate::introspect`] plus the
 //! options here, which is what makes the renderers testable on their own.
 //!
+//! ```no_run
+//! use iridium_proto::config::Generate;
+//! use iridium_proto::{introspect, render};
+//!
+//! # async fn example(pool: &sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
+//! let model = introspect::model(pool, "shop", "product").await?;
+//! let generate = Generate::default();
+//! let opts = render::Opts {
+//!     generate: &generate,
+//!     pyo3: false,
+//!     inputs: true,
+//!     model_path: "crate::model".to_string(),
+//!     strategy: render::Strategy::Embedded,
+//!     target: "dev",
+//!     command: "proto model shop.product".to_string(),
+//!     name_override: None,
+//!     bridge_path: "super::python".to_string(),
+//!     query_path: "super::query".to_string(),
+//!     mapper_path: "crate::mapper".to_string(),
+//! };
+//! let rendered = render::model::model_file(&model, &opts, None);
+//! for warning in &rendered.warnings {
+//!     eprintln!("warning: {warning}");
+//! }
+//! print!("{}", rendered.code);
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! - [`model`] writes the row structs, their enum types, and the insert
 //!   input types.
 //! - [`children`] names the field a parent holds its child rows in, so

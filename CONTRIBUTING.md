@@ -124,9 +124,31 @@ regenerates, and checks the tree goes quiet again. Then it drops a table
 and checks `--prune` takes back the model without touching a
 hand-written file beside it.
 
+It also runs the generated `Data` operation from Rust — a request per
+operation, a patch that sets one column and nulls another, the errors
+it reports — so the routing table is proved against the server, not
+only rendered.
+
 `just python` is the same argument for the `--pyo3` output: it builds an
-extension module from generated models and drives it from an
-interpreter. Run it if you touch anything pyo3.
+extension module from generated models, mappers and the `Data` class,
+and drives all of it from an interpreter. Run it if you touch anything
+pyo3.
+
+## How a change lands
+
+Each issue gets its own branch, `issue-N-<slug>`, and one pull request
+that closes it. A comment on the issue names the branch and the design
+calls made along the way, so the reasoning is on the issue, not only in
+the diff.
+
+Every pull request is reviewed by Copilot. Its findings are addressed
+as one new commit per round — never an amend, so the review history
+stays readable — with a reply on each thread saying what changed and in
+which commit. Findings it suppressed get one comment on the pull
+request saying which were addressed and which were left, and why.
+
+Nothing is pushed before the gates pass locally: `just check`, and the
+round trip and Python gates when the change touches what they cover.
 
 ## What a change needs
 
@@ -155,7 +177,8 @@ approve the run manually, so there may be a wait.
 A regeneration corrects a file rather than replacing it: proto parses
 what is on disk and what the file should say, and edits only where they
 disagree. Comments, hand-written impls and anything else stay where they
-are. See the README section for what that does and does not cover.
+are. See [docs/editing-generated-code.md](docs/editing-generated-code.md)
+for what that does and does not cover.
 
 ## Reporting bugs
 

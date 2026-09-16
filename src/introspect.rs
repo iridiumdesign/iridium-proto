@@ -1,6 +1,21 @@
 //! Reads the Postgres catalogs. Everything proto knows about a table comes
 //! from here: columns in ordinal order, nullability, comments, the primary
 //! key, and the enum and composite types the columns reference.
+//!
+//! ```no_run
+//! use iridium_proto::introspect;
+//!
+//! # async fn example(pool: &sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
+//! let model = introspect::model(pool, "shop", "product").await?;
+//! for column in &model.table.columns {
+//!     println!("{}: {:?}{}", column.name, column.ty, if column.not_null { "" } else { "?" });
+//! }
+//! for child in &model.table.children {
+//!     println!("{}.{} refers here through {}", child.schema, child.table, child.column);
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 use sqlx::{PgPool, Row};
 
