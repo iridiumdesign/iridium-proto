@@ -628,17 +628,24 @@ row = data.update(row, user_id, request_id)                # the row as written
 ```
 
 `find` addresses a row by the table's key, read as the key's own type
-— a tuple in column order for a composite key. `store` takes an input,
-a `New…`, and routes by its type; `update` takes a row and writes it
-back in full, as the mapper's `update` does. Each writes one line to
-the `proto.data` logger before returning, `INFO` when it went through
-and `ERROR` with the error when it did not, carrying `request_id=` and
-`user_id=`, the operation, the table or type, and the key:
+— a tuple in column order for a composite key. One value per key
+column: a list is several, and is refused rather than found by `ANY`.
+`store` takes an input, a `New…`, and routes by its type; `update`
+takes a row and writes it back in full, as the mapper's `update` does.
+Each writes one line to the `proto.data` logger before returning,
+`INFO` when it went through and `ERROR` with the error when it did
+not, carrying `request_id=` and `user_id=`, the operation, the table
+and the key — for `store`, the key as the database filled it in:
 
 ```
 request_id=8f3a… user_id=brad find shop.product pk=…: ok
+request_id=8f3a… user_id=brad store NewProduct shop.product pk=…: ok
 request_id=8f3a… user_id=brad update Product: failed: DatabaseError: …
 ```
+
+It is one line whatever the ids carry: a control character in an id,
+a key or an error is written as its escape, so a caller's input cannot
+end the record or start another.
 
 Three exceptions come with the module. `OperationError` is what an
 operation raises unless it has a more specific one: a table `Data`

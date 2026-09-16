@@ -122,13 +122,29 @@ pub fn data_file(sources: &[Source], opts: &Opts, aliases: bool) -> Rendered {
             let module = naming::ident(&table.name);
             let mapper = format!("{}::{module}", source.mapper_path);
             let model_path = format!("{}::{module}", source.model_path);
+            // The log line names the row written by its key, read off
+            // the Python object by attribute, so a key the database
+            // filled in is there too.
+            let attrs = table
+                .primary_key
+                .iter()
+                .map(|c| format!("\"{}\"", escape(&bare_ident(c))))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let detail = if table.primary_key.is_empty() {
+                format!("\"{qualified}\".to_string()")
+            } else {
+                format!("format!(\"{qualified} pk={{}}\", Self::key_of(&object, &[{attrs}])?)")
+            };
             if has(Kind::Insert) {
                 store_arms.push_str(&format!(
                     r#"    if model.is_instance_of::<{model_path}::New{row}>() {{
         let new: {model_path}::New{row} = model.extract()?;
         let mapper = {mapper}::{row}Mapper::new(&db.pool);
         let row = run(db, py, mapper.create(&new)).map_err(|e| Self::database(py, e))?;
-        return Ok(row.into_pyobject(py)?.into_any().unbind());
+        let object = row.into_pyobject(py)?.into_any();
+        let detail = {detail};
+        return Ok((object.unbind(), detail));
     }}
 "#
                 ));
@@ -139,7 +155,9 @@ pub fn data_file(sources: &[Source], opts: &Opts, aliases: bool) -> Rendered {
         let row: {model_path}::{row} = model.extract()?;
         let mapper = {mapper}::{row}Mapper::new(&db.pool);
         let row = run(db, py, mapper.update(&row)).map_err(|e| Self::database(py, e))?;
-        return Ok(row.into_pyobject(py)?.into_any().unbind());
+        let object = row.into_pyobject(py)?.into_any();
+        let detail = {detail};
+        return Ok((object.unbind(), detail));
     }}
 "#
                 ));
@@ -203,11 +221,13 @@ pub fn data_file(sources: &[Source], opts: &Opts, aliases: bool) -> Rendered {
 }}
 
 /// `find` behind its log line: the key as a `where`, through `route`,
-/// and the one row out of what it finds.
-{OWNED}fn find_one(py: Python<'_>, db: &Database, table: &str, pk: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {{
+/// and the one row out of what it finds. Each key column takes one
+/// value: a list would bind as `= ANY` and find several.
+{OWNED}fn find_one(py: Python<'_>, db: &Database, table: &str, pk: &Bound<'_, PyAny>) -> PyResult<(Py<PyAny>, String)> {{
     let columns = Self::key(table)?;
     let conditions = PyDict::new(py);
     if let [column] = columns {{
+        Self::one_value(table, pk)?;
         conditions.set_item(column, pk)?;
     }} else {{
         let parts: Vec<Bound<'_, PyAny>> = pk.try_iter()?.collect::<PyResult<_>>()?;
@@ -219,6 +239,7 @@ pub fn data_file(sources: &[Source], opts: &Opts, aliases: bool) -> Rendered {
             )));
         }}
         for (column, part) in columns.iter().zip(parts) {{
+            Self::one_value(table, &part)?;
             conditions.set_item(column, part)?;
         }}
     }}
@@ -232,22 +253,55 @@ pub fn data_file(sources: &[Source], opts: &Opts, aliases: bool) -> Rendered {
     }};
     let rows = Self::route(py, db, table, &request).map_err(|e| Self::database(py, e))?;
     let rows = rows.into_bound(py).downcast_into::<pyo3::types::PyList>()?;
-    Ok(match rows.len() {{
+    let row = match rows.len() {{
         0 => py.None(),
         _ => rows.get_item(0)?.unbind(),
+    }};
+    Ok((row, String::new()))
+}}
+
+/// One key value, as `find` is addressed by: a list, tuple or set is
+/// several, and is refused before it can bind as `= ANY`.
+{OWNED}fn one_value(table: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {{
+    if value.is_instance_of::<pyo3::types::PyList>()
+        || value.is_instance_of::<pyo3::types::PyTuple>()
+        || value.is_instance_of::<pyo3::types::PySet>()
+        || value.is_instance_of::<pyo3::types::PyFrozenSet>()
+    {{
+        return Err(OperationError::new_err(format!(
+            "`{{table}}` is addressed by one value per key column; a collection is not one"
+        )));
+    }}
+    Ok(())
+}}
+
+/// The key of `object`, a row, as `str()` gives each column: one value,
+/// or a tuple of them, for a log line.
+{OWNED}fn key_of(object: &Bound<'_, PyAny>, attrs: &[&str]) -> PyResult<String> {{
+    let mut parts = Vec::with_capacity(attrs.len());
+    for attr in attrs {{
+        parts.push(object.getattr(*attr)?.str()?.to_string());
+    }}
+    Ok(match parts.as_slice() {{
+        [one] => one.clone(),
+        _ => format!("({{}})", parts.join(", ")),
     }})
 }}
 
-/// `store` by the model's type: the table whose input it is.
-{OWNED}fn store(py: Python<'_>, db: &Database, model: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {{
+/// `store` by the model's type: the table whose input it is. The row
+/// comes back with the table and key it was written under, for the
+/// log line.
+{OWNED}fn store(py: Python<'_>, db: &Database, model: &Bound<'_, PyAny>) -> PyResult<(Py<PyAny>, String)> {{
 {store_arms}    Err(OperationError::new_err(format!(
         "`{{}}` is not an input Data knows",
         Self::type_name(model)
     )))
 }}
 
-/// `update` by the model's type: the table whose row it is.
-{OWNED}fn update(py: Python<'_>, db: &Database, model: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {{
+/// `update` by the model's type: the table whose row it is. The row
+/// comes back with the table and key it was written under, for the
+/// log line.
+{OWNED}fn update(py: Python<'_>, db: &Database, model: &Bound<'_, PyAny>) -> PyResult<(Py<PyAny>, String)> {{
 {update_arms}    Err(OperationError::new_err(format!(
         "`{{}}` is not a row Data knows",
         Self::type_name(model)
@@ -256,32 +310,45 @@ pub fn data_file(sources: &[Source], opts: &Opts, aliases: bool) -> Rendered {
 
 /// The outcome, logged: one line to the `proto.data` logger with the
 /// ids that trace a request, INFO when it went through and ERROR, with
-/// the error, when it did not. The outcome is handed on either way.
+/// the error, when it did not. One line whatever the ids, the key or
+/// the error carry: a control character is written escaped, so a
+/// caller's input cannot end the record or start another. The outcome
+/// is handed on either way.
 {OWNED}fn logged(
     py: Python<'_>,
     user_id: &str,
     request_id: &str,
     what: &str,
-    outcome: PyResult<Py<PyAny>>,
+    outcome: PyResult<(Py<PyAny>, String)>,
 ) -> PyResult<Py<PyAny>> {{
     let logger = py.import("logging")?.call_method1("getLogger", ("proto.data",))?;
     match outcome {{
-        Ok(value) => {{
+        Ok((value, detail)) => {{
             let result = if value.is_none(py) {{ "not found" }} else {{ "ok" }};
-            logger.call_method1(
-                "info",
-                (format!("request_id={{request_id}} user_id={{user_id}} {{what}}: {{result}}"),),
-            )?;
+            let detail = if detail.is_empty() {{ detail }} else {{ format!(" {{detail}}") }};
+            let line = format!("request_id={{request_id}} user_id={{user_id}} {{what}}{{detail}}: {{result}}");
+            logger.call_method1("info", (Self::one_line(&line),))?;
             Ok(value)
         }}
         Err(error) => {{
-            logger.call_method1(
-                "error",
-                (format!("request_id={{request_id}} user_id={{user_id}} {{what}}: failed: {{error}}"),),
-            )?;
+            let line = format!("request_id={{request_id}} user_id={{user_id}} {{what}}: failed: {{error}}");
+            logger.call_method1("error", (Self::one_line(&line),))?;
             Err(error)
         }}
     }}
+}}
+
+/// `text` on one line: every control character as its escape.
+{OWNED}fn one_line(text: &str) -> String {{
+    text.chars()
+        .map(|c| {{
+            if c.is_control() {{
+                c.escape_default().to_string()
+            }} else {{
+                c.to_string()
+            }}
+        }})
+        .collect()
 }}
 
 /// A mapper's `ProtoError` as the operation's `DatabaseError`; any
@@ -731,15 +798,33 @@ mod tests {
             "        \"shop.product\" | \"product\" => Ok(&[\"id\"]),",
             "        if model.is_instance_of::<crate::model::product::NewProduct>() {",
             "            let row = run(db, py, mapper.create(&new)).map_err(|e| Self::database(py, e))?;",
+            "            let detail = format!(\"shop.product pk={}\", Self::key_of(&object, &[\"id\"])?);",
+            "            return Ok((object.unbind(), detail));",
             "        if model.is_instance_of::<crate::model::product::Product>() {",
             "            let row = run(db, py, mapper.update(&row)).map_err(|e| Self::database(py, e))?;",
+            "            Self::one_value(table, pk)?;",
             "py.import(\"logging\")?.call_method1(\"getLogger\", (\"proto.data\",))?;",
-            "format!(\"request_id={request_id} user_id={user_id} {what}: {result}\")",
+            "format!(\"request_id={request_id} user_id={user_id} {what}{detail}: {result}\")",
             "format!(\"request_id={request_id} user_id={user_id} {what}: failed: {error}\")",
+            "logger.call_method1(\"info\", (Self::one_line(&line),))?;",
             "if error.is_instance_of::<crate::mapper::python::ProtoError>(py) {",
         ] {
             assert!(out.contains(needed), "missing {needed}\n{out}");
         }
+
+        // A composite key: every column, in order, both where `find`
+        // reads it and where the log line reads it back off the row.
+        let mut model = fixture::product();
+        model.table.primary_key = vec!["id".into(), "slug".into()];
+        let out = render(&[model]);
+        assert!(
+            out.contains("        \"shop.product\" | \"product\" => Ok(&[\"id\", \"slug\"]),"),
+            "{out}"
+        );
+        assert!(
+            out.contains("Self::key_of(&object, &[\"id\", \"slug\"])?"),
+            "{out}"
+        );
 
         // A table without a key cannot be found by one, and says so;
         // it takes no store or update either.
