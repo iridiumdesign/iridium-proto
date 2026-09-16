@@ -14,6 +14,13 @@ class as a thin wrapper over it ([#17]). See the
 
 ### Added
 
+- `Data.find(table, pk, user_id, request_id)`, `Data.store(model, …)`
+  and `Data.update(model, …)`: by key and by type, each writing one
+  line to the `proto.data` logger with both ids before returning. With
+  them the module exports `OperationError`, `DatabaseError` and
+  `PermissionError`, the errors the original Python proto had; a
+  mapper's `ProtoError` reaches an operation's caller as
+  `DatabaseError`. ([#25])
 - `set_id_on_children` on every row type: copies the row's key into
   every child row it holds and on down through theirs, in memory, so a
   parent and its children built by hand agree before a save, however
@@ -117,3 +124,4 @@ moves, correcting files rather than overwriting them.
 [#17]: https://github.com/iridiumdesign/iridium-proto/issues/17
 [#19]: https://github.com/iridiumdesign/iridium-proto/issues/19
 [#21]: https://github.com/iridiumdesign/iridium-proto/issues/21
+[#25]: https://github.com/iridiumdesign/iridium-proto/issues/25
