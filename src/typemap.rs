@@ -110,8 +110,8 @@ pub fn map(ty: &PgType, generate: &Generate) -> Mapped {
             Mapped {
                 // The enum is generated, so whether it is Copy or Clone
                 // is whatever the configured derives say.
-                copy: generate.enum_derives.iter().any(|d| d == "Copy"),
-                clone: generate.enum_derives.iter().any(|d| d == "Clone"),
+                copy: has_derive(&generate.enum_derives, "Copy"),
+                clone: has_derive(&generate.enum_derives, "Clone"),
                 ..Mapped::borrowed(naming::pascal_case(name), &[])
             }
         }),
@@ -119,13 +119,22 @@ pub fn map(ty: &PgType, generate: &Generate) -> Mapped {
             override_for(name, &generate.types).unwrap_or_else(|| Mapped {
                 // The struct is generated, so whether it is Copy or
                 // Clone is whatever the configured derives say.
-                copy: generate.composite_derives.iter().any(|d| d == "Copy"),
-                clone: generate.composite_derives.iter().any(|d| d == "Clone"),
+                copy: has_derive(&generate.composite_derives, "Copy"),
+                clone: has_derive(&generate.composite_derives, "Clone"),
                 ..Mapped::borrowed(naming::pascal_case(name), &[])
             })
         }
         PgType::Scalar(name) => override_for(name, &generate.types).unwrap_or_else(|| scalar(name)),
     }
+}
+
+/// Whether a derive list names `trait_`, bare or by path: `Clone` and
+/// `std::clone::Clone` both do, since the list is written into the
+/// `#[derive]` as it is and either compiles.
+fn has_derive(derives: &[String], trait_: &str) -> bool {
+    derives
+        .iter()
+        .any(|d| d.rsplit("::").next() == Some(trait_))
 }
 
 fn override_for(name: &str, overrides: &HashMap<String, String>) -> Option<Mapped> {
@@ -237,6 +246,11 @@ mod tests {
         assert!(map(&status, &generate).clone);
         generate.enum_derives = vec!["Debug".into()];
         assert!(!map(&status, &generate).clone);
+        // A derive by path is the same derive.
+        generate.enum_derives = vec!["std::clone::Clone".into(), "core::marker::Copy".into()];
+        assert!(map(&status, &generate).clone);
+        assert!(map(&status, &generate).copy);
+        generate.enum_derives = vec!["Debug".into()];
         assert!(!map(&PgType::Array(Box::new(status.clone())), &generate).clone);
         generate
             .types
