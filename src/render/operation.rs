@@ -110,6 +110,7 @@ pub fn data_file(sources: &[Source], opts: &Opts, aliases: bool) -> Rendered {
         }
     }
     let mut taken = std::collections::BTreeSet::new();
+    let mut taken_variants = std::collections::BTreeSet::new();
     let mut served = Vec::new();
     for source in sources {
         for model in source.models {
@@ -130,10 +131,20 @@ pub fn data_file(sources: &[Source], opts: &Opts, aliases: bool) -> Rendered {
             if aliases && bare[table.name.as_str()] == 1 {
                 pattern.push_str(&format!(" | \"{}\"", escape(&table.name)));
             }
+            // The variant is the handler in PascalCase, which folds
+            // `bar_2` and `bar2` together: a second of a name takes a
+            // number too.
+            let base = naming::pascal_case(&handler);
+            let mut variant = base.clone();
+            let mut n = 2;
+            while !taken_variants.insert(variant.clone()) {
+                variant = format!("{base}{n}");
+                n += 1;
+            }
             served.push(Served {
                 model,
                 source,
-                variant: naming::pascal_case(&handler),
+                variant,
                 handler,
                 qualified,
                 pattern,
@@ -195,7 +206,13 @@ pub fn data_file(sources: &[Source], opts: &Opts, aliases: bool) -> Rendered {
         }
     };
     let outcome_derives = derives(&generate.derives, true);
-    let values_derives = derives(&generate.input_derives, false);
+    // `Values` holds inputs and patches, so it is Debug only where both
+    // the input's derives and the row's, which the patch follows, say so.
+    let values_derives = if typemap::has_derive(&generate.derives, "Debug") {
+        derives(&generate.input_derives, false)
+    } else {
+        String::new()
+    };
 
     code.push_str(&format!(
         r#"use sqlx::PgPool;
@@ -527,10 +544,16 @@ fn python_block(served: &[Served], opts: &Opts, bridge: &str, feature: &str) -> 
         } else {
             "            let values = None;\n".to_string()
         };
+        // `create` does not read the query, so the dict's `where` is
+        // not read for it either: a condition that would not bind
+        // cannot fail an insert that never runs it.
         let mapper_module = format!("{}::{}", t.source.mapper_path, t.module);
         read_arms.push_str(&format!(
             r#"        {pattern} => {{
-            let query = {mapper_module}::query_from_python(conditions, order_by, limit, offset)?;
+            let query = match op {{
+                Op::Create => Query::new(),
+                _ => {mapper_module}::query_from_python(conditions, order_by, limit, offset)?,
+            }};
 {values}            Ok((query, values))
         }}
 "#
@@ -627,6 +650,14 @@ fn python_block(served: &[Served], opts: &Opts, bridge: &str, feature: &str) -> 
 {OWNED}fn fixed(table: &str, column: &str) -> PyErr {{
     pyo3::exceptions::PyValueError::new_err(format!(
         "`{{column}}` of {{table}} is not yours to set: it is the key, or the database's own"
+    ))
+}}
+
+/// `TypeError`: `update` cannot set the column from Python, and `why`
+/// says what stands in the way.
+{OWNED}fn unsettable(table: &str, column: &str, why: &str) -> PyErr {{
+    pyo3::exceptions::PyTypeError::new_err(format!(
+        "`{{column}}` of {{table}} cannot be set from Python: {{why}}"
     ))
 }}
 "#
@@ -1049,11 +1080,17 @@ fn patch_from_python(t: &Served, opts: &Opts, bridge: &str) -> String {
     let mut arms = String::new();
     for column in &updatable {
         let mapped = typemap::map(&column.ty, generate);
-        if !mapped.copy && !mapped.clone {
-            continue; // not in the patch either
-        }
         let name = escape(&column.name);
         let field = naming::ident(&column.name);
+        // A column the patch left out, or one whose type does not cross,
+        // is refused by name and for its reason, not as a name that is
+        // not a column.
+        if !mapped.copy && !mapped.clone {
+            arms.push_str(&format!(
+                "            \"{name}\" => return Err(Self::unsettable(\"{qualified}\", column.to_str()?, \"its type is not Clone, so it is not in the patch\")),\n"
+            ));
+            continue;
+        }
         match super::mapper::python_type(column, &t.module, &t.source.model_path, generate) {
             Some(ty) => {
                 let ty = if column.not_null {
@@ -1066,7 +1103,7 @@ fn patch_from_python(t: &Served, opts: &Opts, bridge: &str) -> String {
                 ));
             }
             None => arms.push_str(&format!(
-                "            \"{name}\" => return Err({bridge}::unsupported(\"{qualified}\", column.to_str()?)),\n"
+                "            \"{name}\" => return Err(Self::unsettable(\"{qualified}\", column.to_str()?, \"its type does not cross from Python\")),\n"
             )),
         }
     }
@@ -1207,7 +1244,25 @@ mod tests {
         let models = [fixture::product()];
         let out = data_file(&[shop(&models)], &opts, true).code;
         assert!(!out.contains("\"status\" => patch.status"), "{out}");
+        assert!(
+            out.contains(
+                "            \"status\" => return Err(Self::unsettable(\"shop.product\", column.to_str()?, \"its type is not Clone, so it is not in the patch\")),"
+            ),
+            "{out}"
+        );
         assert!(out.contains("\"slug\" => patch.slug"), "{out}");
+        // `Values` holds the patch, so without Debug on the row it has
+        // none either, whatever the input's derives say.
+        let generate = Generate {
+            derives: ["sqlx::FromRow", "Clone"].map(String::from).to_vec(),
+            ..Generate::default()
+        };
+        let opts = fixture::opts(&generate, Strategy::Embedded);
+        let out = data_file(&[shop(&models)], &opts, true).code;
+        assert!(
+            out.contains("#[allow(clippy::large_enum_variant)]\npub enum Values {"),
+            "{out}"
+        );
     }
 
     /// The Python class reads the dict as the table's types, runs the
@@ -1220,7 +1275,9 @@ mod tests {
             "#[cfg(feature = \"python\")]\n#[pyclass(frozen, name = \"Data\")]\npub struct PyData {",
             "    fn execute(&self, py: Python<'_>, request: &Bound<'_, PyDict>) -> PyResult<Py<PyAny>> {",
             "        let op = Op::parse(&op).ok_or_else(|| {",
-            "            let query = crate::mapper::product::query_from_python(conditions, order_by, limit, offset)?;",
+            "Op::Create => Query::new(),",
+            "_ => crate::mapper::product::query_from_python(conditions, order_by, limit, offset)?,",
+            "    fn unsettable(table: &str, column: &str, why: &str) -> PyErr {",
             "                Op::Create => Some(Values::ShopProductInput(",
             "                        .get_type::<crate::model::product::NewProduct>()",
             "                Op::Update => Some(Values::ShopProductPatch(Self::shop_product_patch(",
@@ -1378,6 +1435,22 @@ mod tests {
         // name itself must not carry the prefix, nor the variant.
         assert!(!out.contains("shop_r#"), "{out}");
         assert!(out.contains("    ShopType(Vec<"), "{out}");
+
+        // `bar_2` and `bar2` are two handlers but one PascalCase name:
+        // the second variant takes a number of its own.
+        let mut a = fixture::product();
+        a.table.schema = "foo".into();
+        a.table.name = "bar_2".into();
+        let mut b = fixture::product();
+        b.table.schema = "foo".into();
+        b.table.name = "bar2".into();
+        let out = render(&[a, b]);
+        syn::parse_file(&out).expect("data.rs parses");
+        assert!(out.contains("    async fn foo_bar_2("), "{out}");
+        assert!(out.contains("    async fn foo_bar2("), "{out}");
+        assert!(out.contains("    FooBar2(Vec<"), "{out}");
+        assert!(out.contains("    FooBar22(Vec<"), "{out}");
+        assert_eq!(out.matches("FooBar2(Vec<").count(), 1, "{out}");
     }
 
     #[test]

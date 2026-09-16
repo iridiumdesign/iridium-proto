@@ -9,7 +9,7 @@ use super::{
     OWNED, Opts, dedupe_composites, dedupe_enums, derive_line, doc_comment, escape,
     generated_composites, has_serde, header, import_block, indent, reexport_block, sqlx_type_name,
 };
-use crate::introspect::{Column, Model, PgComposite, PgEnum, Table};
+use crate::introspect::{Column, Model, PgComposite, PgEnum, PgType, Table};
 use crate::naming;
 use crate::typemap;
 
@@ -714,7 +714,13 @@ fn patch_block(
         .name_override
         .clone()
         .unwrap_or_else(|| naming::pascal_case(&table.name));
-    let patch_derives: Vec<String> = ["Debug", "Clone", "Default"].map(String::from).to_vec();
+    // `Clone` and `Default` the patch needs; `Debug` only where the row
+    // has it, since the patch holds the row's own types.
+    let mut patch_derives: Vec<String> = Vec::new();
+    if typemap::has_derive(&opts.generate.derives, "Debug") {
+        patch_derives.push("Debug".to_string());
+    }
+    patch_derives.extend(["Clone", "Default"].map(String::from));
     let derives = derive_line(&patch_derives, imports);
 
     let mut fields = String::new();
@@ -722,9 +728,20 @@ fn patch_block(
     for column in &columns {
         let mapped = typemap::map(&column.ty, opts.generate);
         if !mapped.copy && !mapped.clone {
+            // Only a generated type can lack Clone, and which list
+            // governs it depends on what it is.
+            let mut inner = &column.ty;
+            while let PgType::Array(element) = inner {
+                inner = element;
+            }
+            let list = match inner {
+                PgType::Enum { .. } => "enum_derives",
+                PgType::Composite { .. } => "composite_derives",
+                _ => "derives",
+            };
             warnings.push(format!(
                 "{}.{}: `{name}Patch` leaves `{}` out: its type `{}` is not Clone, and a \
-                 patch is applied to every row a query finds; add `Clone` to its derives \
+                 patch is applied to every row a query finds; add `Clone` to `{list}` \
                  in [generate]",
                 table.schema, table.name, column.name, mapped.text
             ));
@@ -912,9 +929,26 @@ mod tests {
             rendered
                 .warnings
                 .iter()
-                .any(|w| w.contains("`ProductPatch` leaves `status` out")),
+                .any(|w| w.contains("`ProductPatch` leaves `status` out")
+                    && w.contains("add `Clone` to `enum_derives`")),
             "{:?}",
             rendered.warnings
+        );
+
+        // The patch holds the row's own types, so it is Debug only where
+        // the row is.
+        let generate = Generate {
+            derives: ["sqlx::FromRow", "Clone", "Serialize", "Deserialize"]
+                .map(String::from)
+                .to_vec(),
+            ..Generate::default()
+        };
+        let mut opts = fixture::opts(&generate, Strategy::Embedded);
+        opts.inputs = true;
+        let out = model_file(&fixture::product(), &opts, None).code;
+        assert!(
+            out.contains("#[derive(Clone, Default)]\npub struct ProductPatch {"),
+            "{out}"
         );
     }
 

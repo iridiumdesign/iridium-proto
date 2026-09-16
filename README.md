@@ -205,7 +205,7 @@ proto config                 Show the resolved config
 | `--out-dir <dir>` | bulk | Write one model file per table |
 | `--mappers` | bulk | Also generate mappers |
 | `--mapper-dir <dir>` | bulk | Write one mapper file per table |
-| `--operations` | bulk | Also generate the operations; needs `--mappers` and `--pyo3` |
+| `--operations` | bulk | Also generate the operations; needs `--mappers` |
 | `--operation-dir <dir>` | bulk | Write the operations into this directory |
 | `--mapper-path <path>` | operations | Module the operations import mappers from |
 | `--name <name>` | single | Struct name, overriding the derived one |
