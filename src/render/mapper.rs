@@ -10,7 +10,9 @@ use std::collections::BTreeSet;
 
 use super::children::{self, ChildField};
 use super::plan::{self, Kind, Operation};
-use super::{OWNED, Opts, Rendered, Strategy, column_list, escape, header, import_block, indent};
+use super::{
+    OWNED, Opts, Rendered, Strategy, column_list, escape, has_derive, header, import_block, indent,
+};
 use crate::introspect::{Column, Model, PgType, Table};
 use crate::naming;
 use crate::quoting;
@@ -402,7 +404,7 @@ fn python_child_methods(
     let (c_schema, c_table) = (&child.child.schema, &child.child.table);
 
     let mut out = String::new();
-    if opts.generate.derives.iter().any(|d| d == "Clone") {
+    if has_derive(&opts.generate.derives, "Clone") {
         out.push_str(&format!(
             r#"
 /// The row with `{field}` loaded: every `{c_schema}.{c_table}` row that
@@ -1437,6 +1439,19 @@ mod tests {
         );
         assert!(
             rendered.warnings.iter().any(|w| w.contains("`Clone`")),
+            "{:?}",
+            rendered.warnings
+        );
+
+        // `Clone` by path is still `Clone`: the loader stays, unwarned.
+        generate.derives.push("std::clone::Clone".into());
+        let mut opts = fixture::opts(&generate, Strategy::Embedded);
+        opts.pyo3 = true;
+        let rendered = mapper_file(&fixture::product(), &opts);
+        let python = &rendered.code[rendered.code.find("── Python").unwrap()..];
+        assert!(python.contains("fn load_variant_children("), "{python}");
+        assert!(
+            !rendered.warnings.iter().any(|w| w.contains("`Clone`")),
             "{:?}",
             rendered.warnings
         );

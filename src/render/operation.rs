@@ -12,7 +12,7 @@
 //! back as the table's Python classes.
 
 use super::plan::{self, Kind};
-use super::{OWNED, Opts, Rendered, escape, header, indent};
+use super::{OWNED, Opts, Rendered, escape, has_derive, header, indent};
 use crate::introspect::Model;
 use crate::naming;
 use crate::typemap;
@@ -193,10 +193,10 @@ pub fn data_file(sources: &[Source], opts: &Opts, aliases: bool) -> Rendered {
     }
     let derives = |list: &[String], with_serde: bool| {
         let mut out = Vec::new();
-        if typemap::has_derive(list, "Debug") {
+        if has_derive(list, "Debug") {
             out.push("Debug");
         }
-        if with_serde && typemap::has_derive(list, "Serialize") {
+        if with_serde && has_derive(list, "Serialize") {
             out.push("serde::Serialize");
         }
         if out.is_empty() {
@@ -208,7 +208,7 @@ pub fn data_file(sources: &[Source], opts: &Opts, aliases: bool) -> Rendered {
     let outcome_derives = derives(&generate.derives, true);
     // `Values` holds inputs and patches, so it is Debug only where both
     // the input's derives and the row's, which the patch follows, say so.
-    let values_derives = if typemap::has_derive(&generate.derives, "Debug") {
+    let values_derives = if has_derive(&generate.derives, "Debug") {
         derives(&generate.input_derives, false)
     } else {
         String::new()

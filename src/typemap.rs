@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use crate::config::Generate;
 use crate::introspect::PgType;
 use crate::naming;
+use crate::render::has_derive;
 
 /// A Rust type, ready to write into a struct.
 #[derive(Debug, Clone)]
@@ -126,15 +127,6 @@ pub fn map(ty: &PgType, generate: &Generate) -> Mapped {
         }
         PgType::Scalar(name) => override_for(name, &generate.types).unwrap_or_else(|| scalar(name)),
     }
-}
-
-/// Whether a derive list names `trait_`, bare or by path: `Clone` and
-/// `std::clone::Clone` both do, since the list is written into the
-/// `#[derive]` as it is and either compiles.
-pub(crate) fn has_derive(derives: &[String], trait_: &str) -> bool {
-    derives
-        .iter()
-        .any(|d| d.rsplit("::").next() == Some(trait_))
 }
 
 fn override_for(name: &str, overrides: &HashMap<String, String>) -> Option<Mapped> {
