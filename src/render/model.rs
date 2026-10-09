@@ -7,7 +7,8 @@ use super::Rendered;
 use super::children::{self, ChildField};
 use super::{
     OWNED, Opts, dedupe_composites, dedupe_enums, derive_line, doc_comment, escape,
-    generated_composites, has_serde, header, import_block, indent, reexport_block, sqlx_type_name,
+    generated_composites, has_derive, has_serde, header, import_block, indent, reexport_block,
+    sqlx_type_name,
 };
 use crate::introspect::{Column, Model, PgComposite, PgEnum, PgType, Table};
 use crate::naming;
@@ -212,7 +213,7 @@ fn field(column: &Column, ty: &str, derives: &[String], note: Option<&str>) -> S
     let name = naming::ident(&column.name);
     if name.trim_start_matches("r#") != column.name {
         let renamed = escape(&column.name);
-        if derives.iter().any(|d| d == "sqlx::FromRow") {
+        if has_derive(derives, "FromRow") {
             out.push_str(&format!("#[sqlx(rename = \"{renamed}\")]\n"));
         }
         if has_serde(derives) {
@@ -418,7 +419,7 @@ fn child_field(child: &ChildField, table: &Table, parent: &str, opts: &Opts) -> 
         child.child.ref_column,
         child.stem
     );
-    if derives.iter().any(|d| d == "sqlx::FromRow") {
+    if has_derive(derives, "FromRow") {
         out.push_str("#[sqlx(skip)]\n");
     }
     if has_serde(derives) {
@@ -717,7 +718,7 @@ fn patch_block(
     // `Clone` and `Default` the patch needs; `Debug` only where the row
     // has it, since the patch holds the row's own types.
     let mut patch_derives: Vec<String> = Vec::new();
-    if typemap::has_derive(&opts.generate.derives, "Debug") {
+    if has_derive(&opts.generate.derives, "Debug") {
         patch_derives.push("Debug".to_string());
     }
     patch_derives.extend(["Clone", "Default"].map(String::from));
@@ -1000,6 +1001,35 @@ mod tests {
             flat.contains("pub variant_children: Vec<Variant>,"),
             "{flat}"
         );
+    }
+
+    /// The derives are written into `#[derive]` as they are, so one by
+    /// path is the same derive and earns the same field attributes.
+    #[test]
+    fn a_derive_by_path_keeps_its_field_attributes() {
+        let generate = Generate {
+            derives: [
+                "::sqlx::FromRow",
+                "std::clone::Clone",
+                "serde::Serialize",
+                "serde::Deserialize",
+            ]
+            .map(String::from)
+            .to_vec(),
+            ..Generate::default()
+        };
+        let opts = fixture::opts(&generate, Strategy::Embedded);
+        let out = model_file(&fixture::product(), &opts, None).code;
+        assert!(
+            out.contains(
+                "    #[sqlx(skip)]\n    #[serde(default)]\n    pub variant_children: Vec<Variant>,\n"
+            ),
+            "{out}"
+        );
+
+        let out = model_file(&fixture::awkward(), &opts, None).code;
+        assert!(out.contains(r#"#[sqlx(rename = "Mixed Case")]"#), "{out}");
+        assert!(out.contains(r#"#[serde(rename = "Mixed Case")]"#), "{out}");
     }
 
     /// Every row type pushes its key down into the child rows it

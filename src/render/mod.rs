@@ -163,6 +163,9 @@ fn header_with(opts: &Opts, source: &str, kind: &str, prefix: &str) -> String {
     )
 }
 
+/// The derive line, importing what a bare name needs. Matched exactly
+/// rather than by [`has_derive`]: `serde::Serialize` names its own path
+/// and needs no import.
 fn derive_line(derives: &[String], imports: &mut BTreeSet<String>) -> String {
     for d in derives {
         match d.as_str() {
@@ -178,10 +181,17 @@ fn derive_line(derives: &[String], imports: &mut BTreeSet<String>) -> String {
     format!("#[derive({})]\n", derives.join(", "))
 }
 
-pub(crate) fn has_serde(derives: &[String]) -> bool {
+/// Whether a derive list names `trait_`, bare or by path: `Clone` and
+/// `std::clone::Clone` both do, since the list is written into the
+/// `#[derive]` as it is and either compiles.
+pub(crate) fn has_derive(derives: &[String], trait_: &str) -> bool {
     derives
         .iter()
-        .any(|d| d == "Serialize" || d == "Deserialize")
+        .any(|d| d.rsplit("::").next() == Some(trait_))
+}
+
+pub(crate) fn has_serde(derives: &[String]) -> bool {
+    has_derive(derives, "Serialize") || has_derive(derives, "Deserialize")
 }
 
 /// Group full paths into `use` statements, one line per parent module.

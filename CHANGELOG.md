@@ -8,6 +8,16 @@ file says so when it does.
 
 ## [Unreleased]
 
+### Fixed
+
+- A derive written by path, such as `serde::Deserialize`,
+  `::sqlx::FromRow` or `std::clone::Clone`, now counts the same as the
+  bare name everywhere proto reads the derive lists. Before, a row
+  derived that way lost `#[serde(default)]` and `#[sqlx(skip)]` on its
+  children fields, and the serde and sqlx renames on a folded column.
+  Its Python loaders were also dropped, with a warning about `Clone`
+  that the row did not deserve. ([#28])
+
 ## [0.1.2] — 2026-09-16
 
 The operation layer in Rust, and the generated code tightened around
@@ -168,3 +178,4 @@ moves, correcting files rather than overwriting them.
 [#23]: https://github.com/iridiumdesign/iridium-proto/issues/23
 [#24]: https://github.com/iridiumdesign/iridium-proto/issues/24
 [#25]: https://github.com/iridiumdesign/iridium-proto/issues/25
+[#28]: https://github.com/iridiumdesign/iridium-proto/issues/28
