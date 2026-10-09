@@ -8,6 +8,10 @@ file says so when it does.
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-10-09
+
+A small fix: a derive written by path counts as the bare name.
+
 ### Fixed
 
 - A derive written by path, such as `serde::Deserialize`,
@@ -160,7 +164,8 @@ moves, correcting files rather than overwriting them.
 - Identifiers quoted and values bound, held by `tests/injection.rs` and
   the round trip in CI against PostgreSQL 16 and 17.
 
-[Unreleased]: https://github.com/iridiumdesign/iridium-proto/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/iridiumdesign/iridium-proto/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/iridiumdesign/iridium-proto/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/iridiumdesign/iridium-proto/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/iridiumdesign/iridium-proto/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/iridiumdesign/iridium-proto/releases/tag/v0.1.0
